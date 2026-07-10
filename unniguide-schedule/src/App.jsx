@@ -1,5 +1,21 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
-import { dbGet, dbSet, dbListen } from "./firebase";
+import { dbGet, dbSet, dbListen, authListen, authLogin, authLogout } from "./firebase";
+
+// 로그인 계정 이메일 → 표시 이름 (근무표 로그에 남는 이름)
+const EMAIL_TO_NAME = {
+  "yong.yang@healingpaper.com":     "용",
+  "aubrey.plouf@healingpaper.com":  "오브리",
+  "jady.hong@healingpaper.com":     "제이디",
+  "lexi.kliautsova@healingpaper.com": "렉시",
+  "lumi.liu@healingpaper.com":      "루미",
+  "candice.xin@healingpaper.com":   "캔디스",
+  "primrose.sa@healingpaper.com":   "프림",
+  "penny.chavairin@healingpaper.com": "페니",
+  "janee.kaewmanee@healingpaper.com": "짜니",
+  "moka.lee@healingpaper.com":      "모카",
+  "kev.choi@healingpaper.com":      "케브",
+  "yun.jang@healingpaper.com":      "윤",
+};
 
 const STAFF_DEFAULT = [
   { id: 1,  name: "시아",    nameEn: "Sia",       type: "concierge",  lang: null,        active: true },
@@ -157,8 +173,28 @@ export default function App() {
   const [showLogs,  setShowLogs]  = useState(false);
   const [loading,   setLoading]   = useState(true);
   const [prevSchedule, setPrevSchedule] = useState(null);
-  const [userName,  setUserName]  = useState(() => localStorage.getItem("ug_username") || "");
-  const [userNameInput, setUserNameInput] = useState("");
+  const [authUser,  setAuthUser]  = useState(undefined); // undefined=확인중 · null=미로그인 · object=로그인됨
+  const [loginEmail,    setLoginEmail]    = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError,    setLoginError]    = useState("");
+  const [loginBusy,     setLoginBusy]     = useState(false);
+  const userName = authUser ? (EMAIL_TO_NAME[authUser.email] || authUser.email) : "";
+
+  useEffect(() => authListen(setAuthUser), []);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setLoginError("");
+    setLoginBusy(true);
+    try {
+      await authLogin(loginEmail.trim(), loginPassword);
+      setLoginPassword("");
+    } catch (err) {
+      setLoginError("이메일 또는 비밀번호가 올바르지 않습니다.");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
   const longPressTimer     = useRef(null);
   const cellLongPressTimer = useRef(null);
   const cellLongPressed    = useRef(false);
@@ -189,8 +225,9 @@ export default function App() {
     return h;
   }, [altHolidays, pubHolsThisMonth, cancelledHolidays]);
 
-  // 실시간 구독
+  // 실시간 구독 (로그인 후에만 — DB 규칙이 인증된 사용자만 허용)
   useEffect(() => {
+    if (!authUser) return;
     setLoading(true);
     unsubRefs.current.forEach(fn => fn());
     unsubRefs.current = [];
@@ -237,7 +274,7 @@ export default function App() {
 
     unsubRefs.current = [u1, u2, u3, u3b, u4, u5];
     return () => unsubRefs.current.forEach(fn => fn());
-  }, [year, month]);
+  }, [year, month, authUser]);
 
   async function addLog(action) {
     const entry = { user: userName, action, ts: Date.now() };
@@ -511,22 +548,36 @@ export default function App() {
   const dayHeaders  = Array.from({ length: days }, (_, i) => { const d = i + 1, dow = new Date(year, month - 1, d).getDay(); return { d, dow }; });
   const roleLabel   = s => s.type === "concierge" ? "컨시어지" : "컨설턴트";
 
-  // ── 이름 입력 화면 ────────────────────────────────────────────
-  if (!userName) {
+  // ── 인증 확인 중 ──────────────────────────────────────────────
+  if (authUser === undefined) {
     return (
       <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ background: C.white, borderRadius: 16, padding: 32, width: 300, border: `1px solid ${C.line}`, boxShadow: "0 4px 20px rgba(13,13,13,0.06)", textAlign: "center" }}>
+        <div style={{ color: C.grey, fontWeight: 600, fontSize: 13 }}>확인 중…</div>
+      </div>
+    );
+  }
+
+  // ── 로그인 화면 ───────────────────────────────────────────────
+  if (!authUser) {
+    return (
+      <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <form onSubmit={handleLogin} style={{ background: C.white, borderRadius: 16, padding: 32, width: 300, border: `1px solid ${C.line}`, boxShadow: "0 4px 20px rgba(13,13,13,0.06)", textAlign: "center" }}>
           <div style={{ fontWeight: 800, fontSize: 19, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>언니가이드 근무표</div>
-          <div style={{ fontSize: 13, color: C.grey, marginBottom: 20 }}>한글 발음을 입력해주세요</div>
-          <input value={userNameInput} onChange={e => setUserNameInput(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter" && userNameInput.trim()) { localStorage.setItem("ug_username", userNameInput.trim()); setUserName(userNameInput.trim()); } }}
+          <div style={{ fontSize: 13, color: C.grey, marginBottom: 20 }}>로그인 후 이용해주세요</div>
+          <input value={loginEmail} onChange={e => setLoginEmail(e.target.value)}
+            type="email" autoComplete="username"
+            style={{ width: "100%", border: `1px solid ${C.g2}`, borderRadius: 8, padding: "10px 12px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 8 }}
+            placeholder="이메일" autoFocus />
+          <input value={loginPassword} onChange={e => setLoginPassword(e.target.value)}
+            type="password" autoComplete="current-password"
             style={{ width: "100%", border: `1px solid ${C.g2}`, borderRadius: 8, padding: "10px 12px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 12 }}
-            placeholder="예) 제이디, 프림, 캔디스" autoFocus />
-          <button onClick={() => { if (userNameInput.trim()) { localStorage.setItem("ug_username", userNameInput.trim()); setUserName(userNameInput.trim()); } }}
-            style={{ width: "100%", background: C.black, color: C.white, border: "none", borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: font }}>
-            입장하기
+            placeholder="비밀번호" />
+          {loginError && <div style={{ fontSize: 12, color: "#D94A1F", marginBottom: 10 }}>{loginError}</div>}
+          <button type="submit" disabled={loginBusy}
+            style={{ width: "100%", background: C.black, color: C.white, border: "none", borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 14, cursor: loginBusy ? "default" : "pointer", fontFamily: font, opacity: loginBusy ? 0.6 : 1 }}>
+            {loginBusy ? "로그인 중…" : "로그인"}
           </button>
-        </div>
+        </form>
       </div>
     );
   }
@@ -561,7 +612,7 @@ export default function App() {
           </div>
           <span style={{ fontSize: 11, color: C.grey }}>
             {userName}
-            <span style={{ marginLeft: 8, cursor: "pointer", textDecoration: "underline" }} onClick={() => { localStorage.removeItem("ug_username"); setUserName(""); }}>변경</span>
+            <span style={{ marginLeft: 8, cursor: "pointer", textDecoration: "underline" }} onClick={() => authLogout()}>로그아웃</span>
           </span>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
