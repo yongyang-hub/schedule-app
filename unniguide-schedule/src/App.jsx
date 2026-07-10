@@ -30,6 +30,7 @@ const STAFF_DEFAULT = [
   { id: 10, name: "클렙초바",nameEn: "Kleptsova", type: "consultant", lang: "영미",      active: false },
   { id: 11, name: "루미",    nameEn: "Rumi",      type: "consultant", lang: "중국/대만", active: true },
   { id: 12, name: "캔디스",  nameEn: "Candice",   type: "consultant", lang: "중국/대만", active: true },
+  { id: 13, name: "마미",    nameEn: "Mami",      type: "consultant", lang: "일본",      active: true },
 ];
 
 // 배경은 모두 흰색으로 통일하고, 의미는 글자 색으로만 구분 (화사한 화이트 톤)
@@ -48,12 +49,13 @@ const STATUS_CONFIG = {
 };
 
 const DAYS_KO     = ["일","월","화","수","목","금","토"];
-const LANG_GROUPS = ["영미","중국/대만","태국"];
-const LANG_LABEL  = { "영미": "영어", "중국/대만": "중국어", "태국": "태국어" };
-const LANG_MIN    = { "영미": 2, "중국/대만": 1, "태국": 1 }; // 일자별 언어권 최소 배치 (복지 기준)
+const LANG_GROUPS = ["영미","중국/대만","태국","일본"];
+const LANG_LABEL  = { "영미": "영어", "중국/대만": "중국어", "태국": "태국어", "일본": "일본어" };
+const LANG_MIN    = { "영미": 2, "중국/대만": 1, "태국": 1, "일본": 1 }; // 일자별 언어권 최소 배치 (복지 기준)
 const ROOMS       = [1, 2, 4, 5, 6, 7, 8]; // 상담방 (3번 = 워킹룸이라 제외, 총 7개)
-const ZONE_ROOMS  = { "영미": [1, 2, 4], "중국/대만": [5, 6], "태국": [7, 8] }; // 언어권별 홈룸 (영어 1~4 / 중화 5~6 / 태국 6~8)
-const CONSULT_ORDER = ["제이디", "오브리", "렉시", "페니", "캔디스", "루미", "짜니", "프림"]; // 표시·홈룸 순서
+// 언어권별 "선호" 방 — 더 이상 고정 홈룸이 아니라 동적 배정 시 우선순위 힌트로만 사용 (아래 roomMap 참고)
+const ZONE_ROOMS  = { "영미": [1, 2, 4], "중국/대만": [5, 6], "태국": [7, 8] };
+const CONSULT_ORDER = ["제이디", "오브리", "렉시", "페니", "캔디스", "루미", "짜니", "프림", "마미"]; // 표시·배정 우선순위
 const consultOrd = (name) => { const i = CONSULT_ORDER.indexOf(name); return i < 0 ? 999 : i; };
 const ROOM_FROM   = 202607; // 방 배정 로직 적용 시작월(YYYYMM). 이전 달은 이전 버전(방 번호 미표시)
 const GROUPS = [
@@ -61,6 +63,7 @@ const GROUPS = [
   { label: "영어 컨설턴트",        types: ["consultant"], langs: ["영미"] },
   { label: "중국/대만 컨설턴트",   types: ["consultant"], langs: ["중국/대만"] },
   { label: "태국 컨설턴트",        types: ["consultant"], langs: ["태국"] },
+  { label: "일본어 컨설턴트",      types: ["consultant"], langs: ["일본"] },
 ];
 
 const font = "'SUIT','Apple SD Gothic Neo','Malgun Gothic',sans-serif";
@@ -419,34 +422,31 @@ export default function App() {
 
   // 방 배정 — 대면(OFF-Con) 상담사에게 상담방(ROOMS) 배정.
   // 활성 컨설턴트 id순 앞 7명 = 홈룸 고정(이동 0), 8번째 = 스윙(전일 방 우선으로 이동 최소).
+  // 상담방 완전 동적 배정 — 언어권별 고정 홈룸 없이, 매일 "전일 방 유지 우선 + 같은 언어권 선호"로 배정.
+  // 9명(4개 언어권) vs 방 7개로 호모가 항상 모자라기 때문에, 특정인 지정석 대신 배정 우선순위(CONSULT_ORDER)로 공평하게 순환.
   const roomMap = useMemo(() => {
     if (!schedule) return {};
     const consultants = staffList.filter(s => s.active && s.type === "consultant");
-    // 홈룸: 언어권 풀에서 정해진 순서대로 (영어 1·2·4 / 중화 5·6 / 태국 7·8). 풀 초과 인원 = 스윙
-    const home = {};
-    LANG_GROUPS.forEach(lg => {
-      const pool = ZONE_ROOMS[lg] || [];
-      consultants.filter(s => s.lang === lg).sort((a, b) => consultOrd(a.name) - consultOrd(b.name))
-        .forEach((s, i) => { if (i < pool.length) home[s.id] = pool[i]; });
-    });
     const map = {}; consultants.forEach(s => { map[s.id] = {}; });
-    const prev = {};
+    const prev = {}; // 최근에 배정받았던 방(이동 최소화용 힌트) — 방 부족으로 못 받은 날은 갱신하지 않음
     for (let d = 1; d <= days; d++) {
       const face = consultants.filter(s => schedule[s.id]?.[d] === "OFF-Con" && phaseAt(s, year, month, d) === "active")
         .sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
       const used = new Set();
-      face.forEach(s => { // 홈룸 보유자: 자기 방 (이동 0)
-        if (home[s.id] != null) { map[s.id][d] = home[s.id]; used.add(home[s.id]); prev[s.id] = home[s.id]; }
+      // 1순위: 전일 방이 오늘도 비어있으면 유지 (이동 0)
+      face.forEach(s => {
+        if (prev[s.id] != null && !used.has(prev[s.id])) { map[s.id][d] = prev[s.id]; used.add(prev[s.id]); }
       });
-      face.forEach(s => { // 스윙: 같은 언어권 방 우선 + 전일 방 유지(이동 최소)
+      // 2순위: 같은 언어권 선호 방 우선, 없으면 남는 방 아무거나 (CONSULT_ORDER 순서로 공평하게 순환)
+      face.forEach(s => {
         if (map[s.id][d] != null) return;
         const freeAll = ROOMS.filter(r => !used.has(r));
         const freeZone = (ZONE_ROOMS[s.lang] || []).filter(r => !used.has(r));
-        const pick = (prev[s.id] && freeAll.includes(prev[s.id])) ? prev[s.id]
-                   : (freeZone.length ? freeZone[0] : freeAll[0]);
-        if (pick != null) { map[s.id][d] = pick; used.add(pick); prev[s.id] = pick; }
+        const pick = freeZone.length ? freeZone[0] : freeAll[0];
+        if (pick != null) { map[s.id][d] = pick; used.add(pick); }
         else map[s.id][d] = 0; // 방 부족
       });
+      face.forEach(s => { if (map[s.id][d]) prev[s.id] = map[s.id][d]; });
     }
     return map;
   }, [schedule, staffList, days, ym]);
@@ -1169,9 +1169,7 @@ function StaffFormModal({ mode, initial, onSave, onClose, font }) {
       <label style={lbl}>주 언어권</label>
       <select value={f.lang || ""} onChange={e => set("lang", e.target.value || null)} style={inp(font)}>
         <option value="">없음 (컨시어지)</option>
-        <option value="영미">영미</option>
-        <option value="중국/대만">중국/대만</option>
-        <option value="태국">태국</option>
+        {LANG_GROUPS.map(lg => <option key={lg} value={lg}>{lg}</option>)}
       </select>
       <label style={lbl}>보조 언어 <span style={{ fontWeight: 400, color: C.g4 }}>— 추가 담당 가능 언어 (케파에 정식 인원 포함)</span></label>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
