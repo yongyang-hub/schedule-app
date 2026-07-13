@@ -25,7 +25,7 @@ const STAFF_DEFAULT = [
   { id: 5,  name: "짜니",    nameEn: "Janee",     type: "consultant", lang: "태국",      active: true },
   { id: 6,  name: "페니",    nameEn: "Penny",     type: "consultant", lang: "영미",      altLangs: ["태국"], active: true },
   { id: 7,  name: "프림",    nameEn: "Prim",      type: "consultant", lang: "태국",      active: true },
-  { id: 8,  name: "제이디",  nameEn: "Jady",      type: "consultant", lang: "영미",      active: true },
+  { id: 8,  name: "제이디",  nameEn: "Jady",      type: "consultant", lang: "영미",      onlineOnly: true, active: true },
   { id: 9,  name: "안드레아",nameEn: "Andrea",    type: "consultant", lang: "영미",      active: false },
   { id: 10, name: "클렙초바",nameEn: "Kleptsova", type: "consultant", lang: "영미",      active: false },
   { id: 11, name: "루미",    nameEn: "Rumi",      type: "consultant", lang: "중국/대만", active: true },
@@ -122,7 +122,7 @@ function initSchedule(staff, y, m) {
   staff.forEach(st => {
     s[st.id] = {};
     for (let i = 1; i <= d; i++) {
-      s[st.id][i] = (isClosedSunday(y, m, i) || pubHols.has(i)) ? "OFF" : "";
+      s[st.id][i] = (isClosedSunday(y, m, i) || pubHols.has(i)) ? "OFF" : (st.onlineOnly ? "ON-Con" : "");
     }
   });
   return s;
@@ -155,6 +155,7 @@ const fbStaff     = ()      => `staffList`;
 const fbAlt       = (y, m) => `altHolidays/${y}-${String(m).padStart(2, "0")}`;
 const fbCancelled = (y, m) => `cancelledHolidays/${y}-${String(m).padStart(2, "0")}`;
 const fbLogs      = (y, m) => `logs/${y}-${String(m).padStart(2, "0")}`;
+const fbRoomOverride = (y, m) => `roomOverrides/${y}-${String(m).padStart(2, "0")}`;
 
 export default function App() {
   const now = new Date();
@@ -176,6 +177,7 @@ export default function App() {
   const [showLogs,  setShowLogs]  = useState(false);
   const [loading,   setLoading]   = useState(true);
   const [prevSchedule, setPrevSchedule] = useState(null);
+  const [roomOverrides, setRoomOverrides] = useState({}); // { [staffId]: { [day]: roomNumber } } — 강제배치
   const [authUser,  setAuthUser]  = useState(undefined); // undefined=확인중 · null=미로그인 · object=로그인됨
   const [loginEmail,    setLoginEmail]    = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -275,9 +277,21 @@ export default function App() {
       }
     });
 
-    unsubRefs.current = [u1, u2, u3, u3b, u4, u5];
+    const u6 = dbListen(fbRoomOverride(year, month), val => setRoomOverrides(val || {}));
+
+    unsubRefs.current = [u1, u2, u3, u3b, u4, u5, u6];
     return () => unsubRefs.current.forEach(fn => fn());
   }, [year, month, authUser]);
+
+  async function setRoomOverride(sid, day, room) {
+    const next = { ...roomOverrides, [sid]: { ...(roomOverrides[sid] || {}) } };
+    if (room) next[sid][day] = room; else delete next[sid][day];
+    if (Object.keys(next[sid]).length === 0) delete next[sid];
+    setRoomOverrides(next);
+    try { await dbSet(fbRoomOverride(year, month), next); } catch (e) {}
+    const s = staffList.find(x => x.id == sid);
+    await addLog(room ? `${s?.name} ${month}/${day} 방 강제지정: ${room}번` : `${s?.name} ${month}/${day} 방 강제지정 해제`);
+  }
 
   async function addLog(action) {
     const entry = { user: userName, action, ts: Date.now() };
@@ -389,6 +403,70 @@ export default function App() {
     return res;
   }, [schedule, prevSchedule, days, year, month, staffList, allHolidays, prevMonthDays, prevMonth, prevYear, prevPubHols]);
 
+  // 상담방 배정 — 온라인 전담(onlineOnly) 제외한 대면 상담사에게 상담방(ROOMS) 배정.
+  // 1) 홈룸: 대면 담당 인원이 방 수(7) 이내인 동안은 CONSULT_ORDER 순으로 개인별 고정방 배정(이동 0).
+  //    같은 언어권 선호 방을 우선 쓰되, 자기 언어권 방이 다 찼으면 다른 언어권 여유 방으로 스필오버
+  //    (예전처럼 언어권별로 방을 딱 잘라 나누면 총량은 남는데 특정 언어권만 모자란 경우가 생겨서 개선).
+  // 2) 정원 초과분(홈룸 없는 인원)은 매일 "전일 방 유지 우선 + 같은 언어권 선호"로 동적 배정.
+  // 3) 강제배치(roomOverrides)가 있으면 최종적으로 덮어씀 (관리자가 직접 지정, 중복 허용).
+  const roomMap = useMemo(() => {
+    if (!schedule) return {};
+    const consultants = staffList.filter(s => s.active && s.type === "consultant" && !s.onlineOnly);
+    const ordered = [...consultants].sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
+
+    const home = {};
+    const homeUsed = new Set();
+    ordered.forEach(s => {
+      if (homeUsed.size >= ROOMS.length) return;
+      const zonePref = (ZONE_ROOMS[s.lang] || []).filter(r => !homeUsed.has(r));
+      const anyFree  = ROOMS.filter(r => !homeUsed.has(r));
+      const pick = zonePref.length ? zonePref[0] : anyFree[0];
+      if (pick != null) { home[s.id] = pick; homeUsed.add(pick); }
+    });
+
+    const map = {}; consultants.forEach(s => { map[s.id] = {}; });
+    const prev = {};
+    for (let d = 1; d <= days; d++) {
+      const face = consultants.filter(s => schedule[s.id]?.[d] === "OFF-Con" && phaseAt(s, year, month, d) === "active")
+        .sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
+      const used = new Set();
+      face.forEach(s => { // 홈룸 보유자: 자기 방 (이동 0)
+        if (home[s.id] != null && !used.has(home[s.id])) { map[s.id][d] = home[s.id]; used.add(home[s.id]); prev[s.id] = home[s.id]; }
+      });
+      face.forEach(s => { // 홈룸 없는 인원: 전일 방 유지 우선
+        if (map[s.id][d] != null) return;
+        if (prev[s.id] != null && !used.has(prev[s.id])) { map[s.id][d] = prev[s.id]; used.add(prev[s.id]); }
+      });
+      face.forEach(s => { // 그다음: 같은 언어권 선호, 없으면 남는 방 아무거나
+        if (map[s.id][d] != null) return;
+        const freeAll = ROOMS.filter(r => !used.has(r));
+        const freeZone = (ZONE_ROOMS[s.lang] || []).filter(r => !used.has(r));
+        const pick = freeZone.length ? freeZone[0] : freeAll[0];
+        if (pick != null) { map[s.id][d] = pick; used.add(pick); }
+        else map[s.id][d] = 0; // 방 부족
+      });
+      face.forEach(s => { if (map[s.id][d]) prev[s.id] = map[s.id][d]; });
+    }
+
+    Object.keys(roomOverrides).forEach(sid => { // 강제배치 최종 적용
+      if (!map[sid]) map[sid] = {};
+      Object.entries(roomOverrides[sid] || {}).forEach(([day, room]) => { map[sid][day] = room; });
+    });
+
+    return map;
+  }, [schedule, staffList, days, ym, roomOverrides]);
+
+  // 방 중복 사용 — 강제배치로 같은 날 같은 방을 두 명이 쓰게 된 경우 표시용
+  const roomDupByDay = useMemo(() => {
+    const dup = {};
+    for (let d = 1; d <= days; d++) {
+      const counts = {};
+      Object.values(roomMap).forEach(byDay => { const r = byDay?.[d]; if (r) counts[r] = (counts[r] || 0) + 1; });
+      dup[d] = new Set(Object.keys(counts).filter(r => counts[r] > 1).map(Number));
+    }
+    return dup;
+  }, [roomMap, days]);
+
   const warnings = useMemo(() => {
     if (!schedule) return [];
     const w = [];
@@ -411,45 +489,17 @@ export default function App() {
         }
       });
 
-      // 방 부족 — 대면(OFF-Con) 인원이 상담방 수보다 많은 날
-      const faceCount = activeStaff.filter(s => s.type === "consultant" && phaseOf(s, d) === "active" && schedule[s.id]?.[d] === "OFF-Con").length;
-      if (year * 100 + month >= ROOM_FROM && faceCount > ROOMS.length) w.push({ day: d, msg: `방 부족 (대면 ${faceCount}/${ROOMS.length})`, operational: true });
+      // 방 부족 — 대면(OFF-Con) 인원 중 방을 못 받은(0) 사람이 있는 날. 강제배치로 채워지면 자동으로 사라짐.
+      if (year * 100 + month >= ROOM_FROM) {
+        const faceToday = activeStaff.filter(s => s.type === "consultant" && !s.onlineOnly && phaseOf(s, d) === "active" && schedule[s.id]?.[d] === "OFF-Con");
+        const shortCount = faceToday.filter(s => !roomMap[s.id]?.[d]).length;
+        if (shortCount > 0) w.push({ day: d, msg: `방 부족 (대면 ${faceToday.length}/${ROOMS.length})`, operational: true });
+      }
     }
     return w;
-  }, [schedule, year, month, days, activeStaff, allHolidays]);
+  }, [schedule, year, month, days, activeStaff, allHolidays, roomMap]);
 
   const warnDays = new Set(warnings.map(w => w.day));
-
-  // 방 배정 — 대면(OFF-Con) 상담사에게 상담방(ROOMS) 배정.
-  // 활성 컨설턴트 id순 앞 7명 = 홈룸 고정(이동 0), 8번째 = 스윙(전일 방 우선으로 이동 최소).
-  // 상담방 완전 동적 배정 — 언어권별 고정 홈룸 없이, 매일 "전일 방 유지 우선 + 같은 언어권 선호"로 배정.
-  // 9명(4개 언어권) vs 방 7개로 호모가 항상 모자라기 때문에, 특정인 지정석 대신 배정 우선순위(CONSULT_ORDER)로 공평하게 순환.
-  const roomMap = useMemo(() => {
-    if (!schedule) return {};
-    const consultants = staffList.filter(s => s.active && s.type === "consultant");
-    const map = {}; consultants.forEach(s => { map[s.id] = {}; });
-    const prev = {}; // 최근에 배정받았던 방(이동 최소화용 힌트) — 방 부족으로 못 받은 날은 갱신하지 않음
-    for (let d = 1; d <= days; d++) {
-      const face = consultants.filter(s => schedule[s.id]?.[d] === "OFF-Con" && phaseAt(s, year, month, d) === "active")
-        .sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
-      const used = new Set();
-      // 1순위: 전일 방이 오늘도 비어있으면 유지 (이동 0)
-      face.forEach(s => {
-        if (prev[s.id] != null && !used.has(prev[s.id])) { map[s.id][d] = prev[s.id]; used.add(prev[s.id]); }
-      });
-      // 2순위: 같은 언어권 선호 방 우선, 없으면 남는 방 아무거나 (CONSULT_ORDER 순서로 공평하게 순환)
-      face.forEach(s => {
-        if (map[s.id][d] != null) return;
-        const freeAll = ROOMS.filter(r => !used.has(r));
-        const freeZone = (ZONE_ROOMS[s.lang] || []).filter(r => !used.has(r));
-        const pick = freeZone.length ? freeZone[0] : freeAll[0];
-        if (pick != null) { map[s.id][d] = pick; used.add(pick); }
-        else map[s.id][d] = 0; // 방 부족
-      });
-      face.forEach(s => { if (map[s.id][d]) prev[s.id] = map[s.id][d]; });
-    }
-    return map;
-  }, [schedule, staffList, days, ym]);
 
   async function changeMonth(delta) {
     let m = month + delta, y = year;
@@ -800,6 +850,9 @@ export default function App() {
                         const isAlt  = altHolidays.has(d);
                         const isClosed = isPub || isAlt || isClosedSunday(year, month, d); // 미운영일 → 컬럼 전체 옅은 회색
                         const isEdit = editCell?.sid == s.id && editCell?.day === d;
+                        const room = roomMap[s.id]?.[d];
+                        const isOverride = roomOverrides[s.id]?.[d] != null;
+                        const isDup = room && roomDupByDay[d]?.has(room);
                         return (
                           <td key={d}
                             onClick={() => {
@@ -826,9 +879,9 @@ export default function App() {
                             }}
                             onTouchEnd={() => clearTimeout(cellLongPressTimer.current)}
                             onTouchMove={() => clearTimeout(cellLongPressTimer.current)}
-                            style={{ background: isEdit ? C.orangeLight : isClosed ? C.g1 : C.white, color: cfg.color, fontWeight: 700, fontSize: 10, textAlign: "center", cursor: "pointer", padding: "4px 1px", border: isEdit ? `2px solid ${C.orange}` : `1px solid ${C.g1}`, userSelect: "none", minWidth: 30 }}
-                            title={`${s.name} ${month}/${d} ${cfg.label}${st === "OFF-Con" && roomReady && roomMap[s.id]?.[d] ? ` · ${roomMap[s.id][d]}번방` : ""} | 클릭=OFF토글 / 길게누르기=상태선택`}>
-                            {st === "OFF-Con" ? ((roomReady && roomMap[s.id]?.[d]) ? `대면(no.${roomMap[s.id][d]})` : "대면") : cfg.short}
+                            style={{ background: isEdit ? C.orangeLight : isClosed ? C.g1 : C.white, color: isDup ? C.orangeDark : cfg.color, fontWeight: 700, fontSize: 10, textAlign: "center", cursor: "pointer", padding: "4px 1px", border: isEdit ? `2px solid ${C.orange}` : isDup ? `1px solid ${C.orangeDark}` : `1px solid ${C.g1}`, userSelect: "none", minWidth: 30 }}
+                            title={`${s.name} ${month}/${d} ${cfg.label}${st === "OFF-Con" && roomReady && room ? ` · ${room}번방${isOverride ? " (강제지정)" : ""}${isDup ? " · 중복사용" : ""}` : ""} | 클릭=OFF토글 / 더블클릭 또는 길게누르기=상태선택`}>
+                            {st === "OFF-Con" ? ((roomReady && room) ? `대면(no.${room}${isOverride ? "🔒" : ""})` : "대면") : cfg.short}
                           </td>
                         );
                       })}
@@ -929,6 +982,33 @@ export default function App() {
             })}
             <button onClick={() => { setStatus(editCell.sid, editCell.day, ""); setEditCell(null); }} style={{ gridColumn: "1/-1", background: C.g1, color: C.g5, border: `1px solid ${C.g2}`, borderRadius: 8, padding: "8px", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: font }}>비우기 (-)</button>
           </div>
+
+          {roomReady && schedule[editCell.sid]?.[editCell.day] === "OFF-Con" && (() => {
+            const curOverride = roomOverrides[editCell.sid]?.[editCell.day];
+            const autoRoom = roomMap[editCell.sid]?.[editCell.day];
+            return (
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: C.black, marginBottom: 4 }}>방 강제지정</div>
+                <div style={{ fontSize: 11, color: C.g4, marginBottom: 8 }}>
+                  자동배정: {autoRoom ? `${autoRoom}번` : "부족(배정 불가)"} — 지정하면 이 값을 무시하고 아래 방을 강제로 씁니다 (중복 허용).
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginBottom: 8 }}>
+                  {ROOMS.map(r => (
+                    <button key={r} onClick={() => setRoomOverride(editCell.sid, editCell.day, r)}
+                      style={{ background: curOverride === r ? C.black : C.white, color: curOverride === r ? C.white : C.black, border: `1px solid ${curOverride === r ? C.black : C.g2}`, borderRadius: 8, padding: "8px 0", fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: font }}>
+                      {r}번
+                    </button>
+                  ))}
+                </div>
+                {curOverride != null && (
+                  <button onClick={() => setRoomOverride(editCell.sid, editCell.day, null)}
+                    style={{ width: "100%", background: C.white, color: C.g5, border: `1px solid ${C.g2}`, borderRadius: 8, padding: "8px", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: font }}>
+                    강제지정 해제 (자동배정으로 되돌리기)
+                  </button>
+                )}
+              </div>
+            );
+          })()}
         </Modal>
       )}
 
@@ -1154,6 +1234,7 @@ function StaffFormModal({ mode, initial, onSave, onClose, font }) {
     type:     initial?.type     || "consultant",
     lang:     initial?.lang ?? "영미",
     altLangs: initial?.altLangs || [],
+    onlineOnly: initial?.onlineOnly || false,
   }));
   const set      = (k, v) => setF(p => ({ ...p, [k]: v }));
   const toggleAlt = lg    => setF(p => ({ ...p, altLangs: p.altLangs.includes(lg) ? p.altLangs.filter(x => x !== lg) : [...p.altLangs, lg] }));
@@ -1189,6 +1270,12 @@ function StaffFormModal({ mode, initial, onSave, onClose, font }) {
         <option value="concierge">컨시어지</option>
         <option value="consultant">컨설턴트</option>
       </select>
+      {f.type === "consultant" && (
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, fontSize: 12, color: C.g6, cursor: "pointer" }}>
+          <input type="checkbox" checked={f.onlineOnly} onChange={e => set("onlineOnly", e.target.checked)} />
+          온라인 전담 <span style={{ color: C.g4 }}>— 항상 온라인 상담만, 대면(상담방) 배정 대상에서 제외</span>
+        </label>
+      )}
       <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
         <button onClick={() => onSave(f, isEdit ? initial.id : undefined)} style={{ flex: 1, background: C.orange, color: C.white, border: "none", borderRadius: 8, padding: "10px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: font }}>{isEdit ? "저장" : "추가"}</button>
         <button onClick={onClose} style={{ flex: 1, background: C.white, border: `1px solid ${C.g2}`, color: C.black, borderRadius: 8, padding: "10px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: font }}>취소</button>
