@@ -15,6 +15,7 @@ const EMAIL_TO_NAME = {
   "moka.lee@healingpaper.com":      "모카",
   "kev.choi@healingpaper.com":      "케브",
   "yun.jang@healingpaper.com":      "윤",
+  "lara.thun@healingpaper.com":     "라라",
 };
 
 const STAFF_DEFAULT = [
