@@ -5,6 +5,30 @@
 
 const LANG_LABEL = { "영미": "영어", "중국/대만": "중국/대만", "태국": "태국", "일본": "일본" };
 
+// 이름 -> Slack 사용자 ID. 매핑이 있으면 @태그로, 없으면 이름 그대로 표시.
+const NAME_TO_SLACK_ID = {
+  "라라": "U0AM4JE6BBK",
+  "헤일리": "U0B0BAUN067",
+  "오브리": "U0B219DE2KD",
+  "제이디": "U0A850X4CCB",
+  "렉시": "U0B28GM6QGK",
+  "루미": "U0ALRM2LD7C",
+  "캔디스": "U09MK8A3WDC",
+  "프림": "U0976S66G93",
+  "페니": "U0AEG8Q6AAJ",
+  "짜니": "U0AFCJNPVS4",
+  "모카": "U0B5A1GFJGY",
+  "케브": "U09DYUPULGM",
+  "윤": "U01PMBJG4CV",
+  "마미": "U0BFHSLCJQ3",
+  "용": "U09U5QR0JL8",
+};
+
+function mention(name) {
+  const id = NAME_TO_SLACK_ID[name];
+  return id ? `<@${id}>` : name;
+}
+
 async function signIn() {
   const res = await fetch(
     `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${process.env.FIREBASE_API_KEY}`,
@@ -55,35 +79,36 @@ async function buildDigest() {
   for (const s of active) {
     const st = statusOf(s.id);
     if (s.type === "concierge") {
-      if (st === "R1") floor1.push(s.name);
-      else if (st === "R2") floor2.push(s.name);
-      else if (st === "VAC") onVacation.push(s.name);
+      if (st === "R1") floor1.push(mention(s.name));
+      else if (st === "R2") floor2.push(mention(s.name));
+      else if (st === "VAC") onVacation.push(mention(s.name));
       continue;
     }
     if (st === "VAC") {
-      onVacation.push(s.name);
+      onVacation.push(mention(s.name));
       continue;
     }
     if (!st || st === "OFF") continue;
     if (s.onlineOnly) {
-      onlineOnly.push(s.name);
+      onlineOnly.push(mention(s.name));
       continue;
     }
     const lg = s.lang || "기타";
-    const label = st === "OFF-Con" ? `${s.name}(대면)` : st === "ON-Con" ? `${s.name}(온라인)` : `${s.name}(${st})`;
+    const label =
+      st === "OFF-Con" ? `${mention(s.name)}(대면)` : st === "ON-Con" ? `${mention(s.name)}(온라인)` : `${mention(s.name)}(${st})`;
     (workingByLang[lg] = workingByLang[lg] || []).push(label);
   }
 
   const lines = [`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}(${weekdayKo}) 출근 명단`, ""];
-  lines.push(`1층 컨시어지: ${floor1.length ? floor1.join(", ") : "없음"}`);
-  lines.push(`2층 컨시어지: ${floor2.length ? floor2.join(", ") : "없음"}`);
+  lines.push(`*1층 컨시어지:* ${floor1.length ? floor1.join(", ") : "없음"}`);
+  lines.push(`*2층 컨시어지:* ${floor2.length ? floor2.join(", ") : "없음"}`);
   for (const lg of ["영미", "중국/대만", "태국", "일본"]) {
     const names = workingByLang[lg];
-    if (names && names.length) lines.push(`${LANG_LABEL[lg] || lg}: ${names.join(", ")}`);
+    if (names && names.length) lines.push(`*${LANG_LABEL[lg] || lg}:* ${names.join(", ")}`);
   }
-  if (onlineOnly.length) lines.push(`온라인 전담: ${onlineOnly.join(", ")}`);
+  if (onlineOnly.length) lines.push(`*온라인 전담:* ${onlineOnly.join(", ")}`);
   lines.push("");
-  lines.push(`휴가: ${onVacation.length ? onVacation.join(", ") : "없음"}`);
+  lines.push(`*휴가:* ${onVacation.length ? onVacation.join(", ") : "없음"}`);
 
   return lines.join("\n");
 }
@@ -109,7 +134,7 @@ export default async function handler(req, res) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         text,
-        username: "Yong/용",
+        username: "출근 알리미",
       }),
     });
     if (!slackRes.ok) {
