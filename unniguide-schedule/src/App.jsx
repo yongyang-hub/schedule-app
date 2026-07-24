@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { dbGet, dbSet, dbListen, authListen, authGoogleLogin, authLogout } from "./firebase";
 
 const ALLOWED_EMAIL_DOMAIN = "healingpaper.com";
+const ADMIN_EMAILS = ["yong.yang@healingpaper.com", "moka.lee@healingpaper.com"];
 
 // 예전 이메일/비밀번호 계정 → 한글 이름 (최초 프로필 설정 시 이름 자동완성용, 소스오브트루스는 아님)
 const EMAIL_TO_NAME = {
@@ -22,18 +23,18 @@ const EMAIL_TO_NAME = {
 
 const STAFF_DEFAULT = [
   { id: 1,  name: "시아",    nameEn: "Sia",       type: "concierge",  lang: null,        active: true },
-  { id: 2,  name: "라라",    nameEn: "Lara",      type: "concierge",  lang: null,        active: true },
-  { id: 3,  name: "케브",    nameEn: "Kev",       type: "concierge",  lang: null,        active: true },
-  { id: 4,  name: "용",      nameEn: "Yong",      type: "concierge",  lang: null,        active: true },
-  { id: 5,  name: "짜니",    nameEn: "Janee",     type: "consultant", lang: "태국",      active: true },
-  { id: 6,  name: "페니",    nameEn: "Penny",     type: "consultant", lang: "영미",      altLangs: ["태국"], active: true },
-  { id: 7,  name: "프림",    nameEn: "Prim",      type: "consultant", lang: "태국",      active: true },
-  { id: 8,  name: "제이디",  nameEn: "Jady",      type: "consultant", lang: "영미",      onlineOnly: true, active: true },
+  { id: 2,  name: "라라",    nameEn: "Lara",      type: "concierge",  lang: null,        active: true, email: "lara.thun@healingpaper.com" },
+  { id: 3,  name: "케브",    nameEn: "Kev",       type: "concierge",  lang: null,        active: true, email: "kev.choi@healingpaper.com" },
+  { id: 4,  name: "용",      nameEn: "Yong",      type: "concierge",  lang: null,        active: true, email: "yong.yang@healingpaper.com" },
+  { id: 5,  name: "짜니",    nameEn: "Janee",     type: "consultant", lang: "태국",      active: true, email: "janee.kaewmanee@healingpaper.com" },
+  { id: 6,  name: "페니",    nameEn: "Penny",     type: "consultant", lang: "영미",      altLangs: ["태국"], active: true, email: "penny.chavairin@healingpaper.com" },
+  { id: 7,  name: "프림",    nameEn: "Prim",      type: "consultant", lang: "태국",      active: true, email: "primrose.sa@healingpaper.com" },
+  { id: 8,  name: "제이디",  nameEn: "Jady",      type: "consultant", lang: "영미",      onlineOnly: true, active: true, email: "jady.hong@healingpaper.com" },
   { id: 9,  name: "안드레아",nameEn: "Andrea",    type: "consultant", lang: "영미",      active: false },
   { id: 10, name: "클렙초바",nameEn: "Kleptsova", type: "consultant", lang: "영미",      active: false },
-  { id: 11, name: "루미",    nameEn: "Rumi",      type: "consultant", lang: "중국/대만", active: true },
-  { id: 12, name: "캔디스",  nameEn: "Candice",   type: "consultant", lang: "중국/대만", active: true },
-  { id: 13, name: "마미",    nameEn: "Mami",      type: "consultant", lang: "일본",      active: true },
+  { id: 11, name: "루미",    nameEn: "Rumi",      type: "consultant", lang: "중국/대만", active: true, email: "lumi.liu@healingpaper.com" },
+  { id: 12, name: "캔디스",  nameEn: "Candice",   type: "consultant", lang: "중국/대만", active: true, email: "candice.xin@healingpaper.com" },
+  { id: 13, name: "마미",    nameEn: "Mami",      type: "consultant", lang: "일본",      active: true, email: "mami.yun@healingpaper.com" },
 ];
 
 // 배경은 모두 흰색으로 통일하고, 의미는 글자 색으로만 구분 (화사한 화이트 톤)
@@ -189,6 +190,9 @@ export default function App() {
   const [profileForm,   setProfileForm]   = useState({ koreanName: "", englishName: "" });
   const [profileSaving, setProfileSaving] = useState(false);
   const userName = userProfile?.koreanName || "";
+  const isAdmin = !!(authUser && ADMIN_EMAILS.includes(authUser.email));
+  const myStaff = (authUser && staffList.find(s => s.email && s.email === authUser.email)) || null;
+  const canEditStaff = sid => isAdmin || (myStaff && myStaff.id == sid); // 관리자는 전체, 일반 직원은 본인 줄만
 
   useEffect(() => authListen(setAuthUser), []);
 
@@ -722,17 +726,19 @@ export default function App() {
             <Btn onClick={() => changeMonth(1)}>›</Btn>
           </div>
           <span style={{ fontSize: 11, color: C.grey }}>
-            {userName}
+            {userName}{isAdmin && <span style={{ marginLeft: 6, background: C.plum, color: C.white, borderRadius: 6, padding: "1px 6px", fontSize: 10, fontWeight: 800 }}>관리자</span>}
             <span style={{ marginLeft: 8, cursor: "pointer", textDecoration: "underline" }} onClick={() => authLogout()}>로그아웃</span>
           </span>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <Btn onClick={() => setBulkModal({})} style={{ background: C.orange, border: "none", color: C.white }}>일괄 입력</Btn>
           <Btn onClick={() => setView(v => v === "table" ? "calendar" : "table")}>{view === "table" ? "캘린더 보기" : "테이블 보기"}</Btn>
-          <Btn onClick={() => setShowInactive(v => !v)} style={showInactive ? { background: C.black, color: C.white, border: "none" } : {}}>
-            {showInactive ? "전체 보기 중" : "합류 대기 포함"}
-          </Btn>
-          <Btn onClick={() => setStaffModal({ mode: "add" })}>직원 추가</Btn>
+          {isAdmin && (
+            <Btn onClick={() => setShowInactive(v => !v)} style={showInactive ? { background: C.black, color: C.white, border: "none" } : {}}>
+              {showInactive ? "전체 보기 중" : "합류 대기 포함"}
+            </Btn>
+          )}
+          {isAdmin && <Btn onClick={() => setStaffModal({ mode: "add" })}>직원 추가</Btn>}
           <Btn onClick={() => setShowLogs(v => !v)} style={showLogs ? { background: C.g1 } : {}}>
             로그{logs.length > 0 && <span style={{ background: C.orange, color: C.white, borderRadius: 10, padding: "1px 6px", fontSize: 10, marginLeft: 5 }}>{logs.length}</span>}
           </Btn>
@@ -766,9 +772,9 @@ export default function App() {
             const name = HOLIDAY_NAMES[`${year}-${month}-${d}`] || "";
             return (
               <span key={d}
-                onClick={() => toggleHoliday(d)}
-                style={{ background: cancelled ? C.g1 : C.orangeMid, borderRadius: 6, padding: "2px 8px", fontWeight: 700, cursor: "pointer", color: cancelled ? C.grey : C.orangeDark, textDecoration: cancelled ? "line-through" : "none" }}
-                title={cancelled ? "클릭하면 공휴일 복원" : "클릭하면 공휴일 취소"}>
+                onClick={() => { if (isAdmin) toggleHoliday(d); }}
+                style={{ background: cancelled ? C.g1 : C.orangeMid, borderRadius: 6, padding: "2px 8px", fontWeight: 700, cursor: isAdmin ? "pointer" : "default", color: cancelled ? C.grey : C.orangeDark, textDecoration: cancelled ? "line-through" : "none" }}
+                title={isAdmin ? (cancelled ? "클릭하면 공휴일 복원" : "클릭하면 공휴일 취소") : undefined}>
                 {month}/{d}{name ? ` ${name}` : ""}({DAYS_KO[new Date(year, month - 1, d).getDay()]}){cancelled ? " (취소됨)" : ""}
               </span>
             );
@@ -781,8 +787,8 @@ export default function App() {
         <div style={{ background: C.plumLight, border: `1px solid ${C.plumMid}33`, borderRadius: 10, padding: "8px 14px", marginBottom: 10, fontSize: 12, color: C.plum, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <strong>지정 휴일</strong>
           {[...altHolidays].sort((a, b) => a - b).map(d => (
-            <span key={d} style={{ background: C.white, border: `1px solid ${C.plumMid}40`, borderRadius: 6, padding: "2px 8px", fontWeight: 700, cursor: "pointer", color: C.plum }}
-              onClick={() => toggleHoliday(d)}>{month}/{d}({DAYS_KO[new Date(year, month - 1, d).getDay()]}) ×</span>
+            <span key={d} style={{ background: C.white, border: `1px solid ${C.plumMid}40`, borderRadius: 6, padding: "2px 8px", fontWeight: 700, cursor: isAdmin ? "pointer" : "default", color: C.plum }}
+              onClick={() => { if (isAdmin) toggleHoliday(d); }}>{month}/{d}({DAYS_KO[new Date(year, month - 1, d).getDay()]}){isAdmin ? " ×" : ""}</span>
           ))}
         </div>
       )}
@@ -876,12 +882,12 @@ export default function App() {
                       <td style={{ padding: "5px 8px", color: C.g5, fontSize: 10, whiteSpace: "nowrap", background: C.white, fontWeight: 500 }}>
                         {roleLabel(s)}{suffix}
                       </td>
-                      <td style={{ padding: "5px 6px", fontWeight: 800, whiteSpace: "nowrap", fontSize: 11, textAlign: "center", background: C.white, cursor: "pointer", userSelect: "none", color: C.black, borderRight: `2px solid ${C.line}` }}
-                        onClick={() => setBulkModal({ preStaff: s.id })}
-                        onMouseDown={() => { longPressTimer.current = setTimeout(() => setLongPressTarget(s.id), 600); }}
+                      <td style={{ padding: "5px 6px", fontWeight: 800, whiteSpace: "nowrap", fontSize: 11, textAlign: "center", background: C.white, cursor: canEditStaff(s.id) ? "pointer" : "default", userSelect: "none", color: C.black, borderRight: `2px solid ${C.line}` }}
+                        onClick={() => { if (canEditStaff(s.id)) setBulkModal({ preStaff: s.id }); }}
+                        onMouseDown={() => { if (isAdmin) longPressTimer.current = setTimeout(() => setLongPressTarget(s.id), 600); }}
                         onMouseUp={() => clearTimeout(longPressTimer.current)}
                         onMouseLeave={() => clearTimeout(longPressTimer.current)}
-                        onTouchStart={() => { longPressTimer.current = setTimeout(() => setLongPressTarget(s.id), 600); }}
+                        onTouchStart={() => { if (isAdmin) longPressTimer.current = setTimeout(() => setLongPressTarget(s.id), 600); }}
                         onTouchEnd={() => clearTimeout(longPressTimer.current)}>
                         <div>{s.name}</div>
                         <div style={{ fontSize: 9, color: C.g4, fontWeight: 600 }}>{s.nameEn}</div>
@@ -914,15 +920,17 @@ export default function App() {
                         const room = roomMap[s.id]?.[d];
                         const isOverride = roomOverrides[s.id]?.[d] != null;
                         const isDup = room && roomDupByDay[d]?.has(room);
+                        const editable = canEditStaff(s.id);
                         return (
                           <td key={d}
                             onClick={() => {
-                              if (cellLongPressed.current) return;
+                              if (!editable || cellLongPressed.current) return;
                               const cur = schedule[s.id]?.[d] ?? "";
                               setStatus(s.id, d, cur === "OFF" ? "" : "OFF");
                             }}
-                            onDoubleClick={() => setEditCell({ sid: s.id, day: d })}
+                            onDoubleClick={() => { if (editable) setEditCell({ sid: s.id, day: d }); }}
                             onMouseDown={() => {
+                              if (!editable) return;
                               cellLongPressed.current = false;
                               cellLongPressTimer.current = setTimeout(() => {
                                 cellLongPressed.current = true;
@@ -932,6 +940,7 @@ export default function App() {
                             onMouseUp={() => clearTimeout(cellLongPressTimer.current)}
                             onMouseLeave={() => clearTimeout(cellLongPressTimer.current)}
                             onTouchStart={() => {
+                              if (!editable) return;
                               cellLongPressed.current = false;
                               cellLongPressTimer.current = setTimeout(() => {
                                 cellLongPressed.current = true;
@@ -940,8 +949,8 @@ export default function App() {
                             }}
                             onTouchEnd={() => clearTimeout(cellLongPressTimer.current)}
                             onTouchMove={() => clearTimeout(cellLongPressTimer.current)}
-                            style={{ background: isEdit ? C.orangeLight : isClosed ? C.g1 : C.white, color: isDup ? C.orangeDark : cfg.color, fontWeight: 700, fontSize: 10, textAlign: "center", cursor: "pointer", padding: "4px 1px", border: isEdit ? `2px solid ${C.orange}` : isDup ? `1px solid ${C.orangeDark}` : `1px solid ${C.g1}`, userSelect: "none", minWidth: 30 }}
-                            title={`${s.name} ${month}/${d} ${cfg.label}${st === "OFF-Con" && roomReady && room ? ` · ${room}번방${isOverride ? " (강제지정)" : ""}${isDup ? " · 중복사용" : ""}` : ""} | 클릭=OFF토글 / 더블클릭 또는 길게누르기=상태선택`}>
+                            style={{ background: isEdit ? C.orangeLight : isClosed ? C.g1 : C.white, color: isDup ? C.orangeDark : cfg.color, fontWeight: 700, fontSize: 10, textAlign: "center", cursor: editable ? "pointer" : "default", padding: "4px 1px", border: isEdit ? `2px solid ${C.orange}` : isDup ? `1px solid ${C.orangeDark}` : `1px solid ${C.g1}`, userSelect: "none", minWidth: 30 }}
+                            title={`${s.name} ${month}/${d} ${cfg.label}${st === "OFF-Con" && roomReady && room ? ` · ${room}번방${isOverride ? " (강제지정)" : ""}${isDup ? " · 중복사용" : ""}` : ""}${editable ? " | 클릭=OFF토글 / 더블클릭 또는 길게누르기=상태선택" : " | 읽기 전용 (본인 근무만 수정 가능)"}`}>
                             {st === "OFF-Con" ? ((roomReady && room) ? `대면(no.${room}${isOverride ? "🔒" : ""})` : "대면") : cfg.short}
                           </td>
                         );
@@ -976,7 +985,7 @@ export default function App() {
             </div>
 
             {/* 공휴일 취소/복원 */}
-            {isPub && (
+            {isAdmin && isPub && (
               isCancelled ? (
                 <>
                   <div style={{ fontSize: 12, color: C.g6, textAlign: "center", background: C.g1, borderRadius: 8, padding: "10px 12px", marginBottom: 14, lineHeight: 1.6 }}>
@@ -1001,7 +1010,7 @@ export default function App() {
             )}
 
             {/* 수동 휴일 해제 / 지정 */}
-            {!isPub && (
+            {isAdmin && !isPub && (
               isAlt ? (
                 <>
                   <div style={{ fontSize: 12, color: C.g6, textAlign: "center", background: C.g1, borderRadius: 8, padding: "10px 12px", marginBottom: 14, lineHeight: 1.6 }}>
@@ -1031,7 +1040,7 @@ export default function App() {
       })()}
 
       {/* 셀 편집 팝업 */}
-      {editCell && (
+      {editCell && canEditStaff(editCell.sid) && (
         <Modal onClose={() => setEditCell(null)}>
           <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 12, color: C.black }}>
             {displayStaff.find(s => s.id == editCell.sid)?.name} — {month}/{editCell.day}({DAYS_KO[new Date(year, month - 1, editCell.day).getDay()]})
@@ -1044,7 +1053,7 @@ export default function App() {
             <button onClick={() => { setStatus(editCell.sid, editCell.day, ""); setEditCell(null); }} style={{ gridColumn: "1/-1", background: C.g1, color: C.g5, border: `1px solid ${C.g2}`, borderRadius: 8, padding: "8px", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: font }}>비우기 (-)</button>
           </div>
 
-          {roomReady && schedule[editCell.sid]?.[editCell.day] === "OFF-Con" && (() => {
+          {isAdmin && roomReady && schedule[editCell.sid]?.[editCell.day] === "OFF-Con" && (() => {
             const curOverride = roomOverrides[editCell.sid]?.[editCell.day];
             const autoRoom = roomMap[editCell.sid]?.[editCell.day];
             return (
@@ -1074,7 +1083,7 @@ export default function App() {
       )}
 
       {/* 길게 누르기 팝업 */}
-      {longPressTarget && (() => {
+      {longPressTarget && isAdmin && (() => {
         const s = staffList.find(x => x.id === longPressTarget);
         const closePopup = () => { setLongPressTarget(null); setDeleteArmed(false); };
         return (
@@ -1125,7 +1134,7 @@ export default function App() {
 
       {/* 일괄 입력 */}
       {bulkModal && (
-        <BulkModal staff={displayStaff} days={days} month={month} year={year} preStaff={bulkModal.preStaff}
+        <BulkModal staff={isAdmin ? displayStaff : (myStaff ? [myStaff] : [])} days={days} month={month} year={year} preStaff={bulkModal.preStaff}
           onApply={async cfg => { await applyBulk(cfg); setBulkModal(null); }}
           onClose={() => setBulkModal(null)} font={font} />
       )}
