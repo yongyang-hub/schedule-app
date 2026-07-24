@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
-import { dbGet, dbSet, dbListen, authListen, authGoogleLogin, authGetRedirectResult, authLogout } from "./firebase";
+import { dbGet, dbSet, dbListen, authListen, authGoogleLogin, authLogout } from "./firebase";
 
 const ALLOWED_EMAIL_DOMAIN = "healingpaper.com";
 
@@ -212,21 +212,16 @@ export default function App() {
     });
   }, [authUser]);
 
-  // 리다이렉트로 구글 로그인 후 돌아왔을 때 에러 캐치용 (성공 시엔 authListen이 authUser를 채워줌)
-  useEffect(() => {
-    authGetRedirectResult().catch(err => {
-      setDomainError(`로그인에 실패했습니다 (${err?.code || err?.message || "알 수 없는 오류"}). 다시 시도해주세요.`);
-      setLoginBusy(false);
-    });
-  }, []);
-
   async function handleGoogleLogin() {
     setDomainError("");
     setLoginBusy(true);
     try {
-      await authGoogleLogin(); // 성공 시 페이지가 구글 로그인 화면으로 이동함
+      await authGoogleLogin();
     } catch (err) {
-      setDomainError("로그인에 실패했습니다. 다시 시도해주세요.");
+      if (err?.code !== "auth/popup-closed-by-user") {
+        setDomainError(`로그인에 실패했습니다 (${err?.code || err?.message || "알 수 없는 오류"}). 다시 시도해주세요.`);
+      }
+    } finally {
       setLoginBusy(false);
     }
   }
