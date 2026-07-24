@@ -1,7 +1,9 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
-import { dbGet, dbSet, dbListen, authListen, authLogin, authLogout } from "./firebase";
+import { dbGet, dbSet, dbListen, authListen, authGoogleLogin, authLogout } from "./firebase";
 
-// 로그인 계정 이메일 → 표시 이름 (근무표 로그에 남는 이름)
+const ALLOWED_EMAIL_DOMAIN = "healingpaper.com";
+
+// 예전 이메일/비밀번호 계정 → 한글 이름 (최초 프로필 설정 시 이름 자동완성용, 소스오브트루스는 아님)
 const EMAIL_TO_NAME = {
   "yong.yang@healingpaper.com":     "용",
   "aubrey.plouf@healingpaper.com":  "오브리",
@@ -157,6 +159,7 @@ const fbAlt       = (y, m) => `altHolidays/${y}-${String(m).padStart(2, "0")}`;
 const fbCancelled = (y, m) => `cancelledHolidays/${y}-${String(m).padStart(2, "0")}`;
 const fbLogs      = (y, m) => `logs/${y}-${String(m).padStart(2, "0")}`;
 const fbRoomOverride = (y, m) => `roomOverrides/${y}-${String(m).padStart(2, "0")}`;
+const fbUserProfile  = (uid)   => `userProfiles/${uid}`;
 
 export default function App() {
   const now = new Date();
@@ -179,26 +182,58 @@ export default function App() {
   const [loading,   setLoading]   = useState(true);
   const [prevSchedule, setPrevSchedule] = useState(null);
   const [roomOverrides, setRoomOverrides] = useState({}); // { [staffId]: { [day]: roomNumber } } — 강제배치
-  const [authUser,  setAuthUser]  = useState(undefined); // undefined=확인중 · null=미로그인 · object=로그인됨
-  const [loginEmail,    setLoginEmail]    = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
-  const [loginError,    setLoginError]    = useState("");
-  const [loginBusy,     setLoginBusy]     = useState(false);
-  const userName = authUser ? (EMAIL_TO_NAME[authUser.email] || authUser.email) : "";
+  const [authUser,    setAuthUser]    = useState(undefined); // undefined=확인중 · null=미로그인 · object=로그인됨
+  const [domainError, setDomainError] = useState("");
+  const [loginBusy,   setLoginBusy]   = useState(false);
+  const [userProfile, setUserProfile] = useState(undefined); // undefined=확인중 · null=최초로그인(설정 필요) · object={koreanName,englishName}
+  const [profileForm,   setProfileForm]   = useState({ koreanName: "", englishName: "" });
+  const [profileSaving, setProfileSaving] = useState(false);
+  const userName = userProfile?.koreanName || "";
 
   useEffect(() => authListen(setAuthUser), []);
 
-  async function handleLogin(e) {
-    e.preventDefault();
-    setLoginError("");
+  // 로그인 상태가 바뀌면: 도메인 검증 후 프로필(userProfiles/{uid}) 조회
+  useEffect(() => {
+    if (authUser === undefined) return;
+    if (!authUser) { setUserProfile(undefined); return; }
+    if (!authUser.email || !authUser.email.endsWith(`@${ALLOWED_EMAIL_DOMAIN}`)) {
+      setDomainError(`${ALLOWED_EMAIL_DOMAIN} 계정으로만 로그인할 수 있습니다.`);
+      authLogout();
+      return;
+    }
+    setDomainError("");
+    dbGet(fbUserProfile(authUser.uid)).then(profile => {
+      if (profile) {
+        setUserProfile(profile);
+      } else {
+        setUserProfile(null);
+        setProfileForm({ koreanName: EMAIL_TO_NAME[authUser.email] || "", englishName: "" });
+      }
+    });
+  }, [authUser]);
+
+  async function handleGoogleLogin() {
+    setDomainError("");
     setLoginBusy(true);
     try {
-      await authLogin(loginEmail.trim(), loginPassword);
-      setLoginPassword("");
+      await authGoogleLogin();
     } catch (err) {
-      setLoginError("이메일 또는 비밀번호가 올바르지 않습니다.");
+      if (err?.code !== "auth/popup-closed-by-user") setDomainError("로그인에 실패했습니다. 다시 시도해주세요.");
     } finally {
       setLoginBusy(false);
+    }
+  }
+
+  async function saveProfile(e) {
+    e.preventDefault();
+    if (!profileForm.koreanName.trim() || !profileForm.englishName.trim()) return;
+    setProfileSaving(true);
+    const profile = { koreanName: profileForm.koreanName.trim(), englishName: profileForm.englishName.trim(), email: authUser.email, createdAt: Date.now() };
+    try {
+      await dbSet(fbUserProfile(authUser.uid), profile);
+      setUserProfile(profile);
+    } finally {
+      setProfileSaving(false);
     }
   }
   const longPressTimer     = useRef(null);
@@ -612,21 +647,44 @@ export default function App() {
   if (!authUser) {
     return (
       <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <form onSubmit={handleLogin} style={{ background: C.white, borderRadius: 16, padding: 32, width: 300, border: `1px solid ${C.line}`, boxShadow: "0 4px 20px rgba(13,13,13,0.06)", textAlign: "center" }}>
+        <div style={{ background: C.white, borderRadius: 16, padding: 32, width: 300, border: `1px solid ${C.line}`, boxShadow: "0 4px 20px rgba(13,13,13,0.06)", textAlign: "center" }}>
           <div style={{ fontWeight: 800, fontSize: 19, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>언니가이드 근무표</div>
-          <div style={{ fontSize: 13, color: C.grey, marginBottom: 20 }}>로그인 후 이용해주세요</div>
-          <input value={loginEmail} onChange={e => setLoginEmail(e.target.value)}
-            type="email" autoComplete="username"
-            style={{ width: "100%", border: `1px solid ${C.g2}`, borderRadius: 8, padding: "10px 12px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 8 }}
-            placeholder="이메일" autoFocus />
-          <input value={loginPassword} onChange={e => setLoginPassword(e.target.value)}
-            type="password" autoComplete="current-password"
-            style={{ width: "100%", border: `1px solid ${C.g2}`, borderRadius: 8, padding: "10px 12px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 12 }}
-            placeholder="비밀번호" />
-          {loginError && <div style={{ fontSize: 12, color: "#D94A1F", marginBottom: 10 }}>{loginError}</div>}
-          <button type="submit" disabled={loginBusy}
+          <div style={{ fontSize: 13, color: C.grey, marginBottom: 20 }}>{ALLOWED_EMAIL_DOMAIN} 계정으로 로그인해주세요</div>
+          {domainError && <div style={{ fontSize: 12, color: "#D94A1F", marginBottom: 12 }}>{domainError}</div>}
+          <button onClick={handleGoogleLogin} disabled={loginBusy}
             style={{ width: "100%", background: C.black, color: C.white, border: "none", borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 14, cursor: loginBusy ? "default" : "pointer", fontFamily: font, opacity: loginBusy ? 0.6 : 1 }}>
-            {loginBusy ? "로그인 중…" : "로그인"}
+            {loginBusy ? "로그인 중…" : `${ALLOWED_EMAIL_DOMAIN} 계정으로 로그인`}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── 프로필 확인 중 ────────────────────────────────────────────
+  if (userProfile === undefined) {
+    return (
+      <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ color: C.grey, fontWeight: 600, fontSize: 13 }}>확인 중…</div>
+      </div>
+    );
+  }
+
+  // ── 최초 로그인: 이름 설정 화면 ───────────────────────────────
+  if (userProfile === null) {
+    return (
+      <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <form onSubmit={saveProfile} style={{ background: C.white, borderRadius: 16, padding: 32, width: 300, border: `1px solid ${C.line}`, boxShadow: "0 4px 20px rgba(13,13,13,0.06)", textAlign: "center" }}>
+          <div style={{ fontWeight: 800, fontSize: 19, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>처음 오셨네요!</div>
+          <div style={{ fontSize: 13, color: C.grey, marginBottom: 20 }}>근무표에 표시할 이름을 설정해주세요</div>
+          <input value={profileForm.koreanName} onChange={e => setProfileForm(p => ({ ...p, koreanName: e.target.value }))}
+            style={{ width: "100%", border: `1px solid ${C.g2}`, borderRadius: 8, padding: "10px 12px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 8 }}
+            placeholder="한글 이름 (예: 라라)" autoFocus />
+          <input value={profileForm.englishName} onChange={e => setProfileForm(p => ({ ...p, englishName: e.target.value }))}
+            style={{ width: "100%", border: `1px solid ${C.g2}`, borderRadius: 8, padding: "10px 12px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 12 }}
+            placeholder="영어 이름 (예: Lara)" />
+          <button type="submit" disabled={profileSaving || !profileForm.koreanName.trim() || !profileForm.englishName.trim()}
+            style={{ width: "100%", background: C.black, color: C.white, border: "none", borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 14, cursor: profileSaving ? "default" : "pointer", fontFamily: font, opacity: profileSaving ? 0.6 : 1 }}>
+            {profileSaving ? "저장 중…" : "시작하기"}
           </button>
         </form>
       </div>

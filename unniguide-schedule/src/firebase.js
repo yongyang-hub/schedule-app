@@ -1,7 +1,7 @@
 
 import { initializeApp } from 'firebase/app';
 import { getDatabase, ref, set, get, onValue } from 'firebase/database';
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -25,7 +25,10 @@ export function dbListen(path, callback) { return onValue(ref(db, path), snap =>
 
 export function authListen(callback) { return onAuthStateChanged(auth, callback); }
 
-export async function authLogin(email, password) { return signInWithEmailAndPassword(auth, email, password); }
+const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ hd: 'healingpaper.com' }); // 계정 선택창에 healingpaper.com 계정만 뜨도록 힌트 (실제 검증은 로그인 후 이메일 도메인 체크 + DB 규칙에서 이중으로 함)
+
+export async function authGoogleLogin() { return signInWithPopup(auth, googleProvider); }
 
 export async function authLogout() { return signOut(auth); }
 
