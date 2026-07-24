@@ -648,36 +648,36 @@ export default function App() {
   // ── 로그인 화면 ───────────────────────────────────────────────
   if (!authUser) {
     return (
-      <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ background: C.white, borderRadius: 16, padding: 32, width: 300, border: `1px solid ${C.line}`, boxShadow: "0 4px 20px rgba(13,13,13,0.06)", textAlign: "center" }}>
-          <div style={{ fontWeight: 800, fontSize: 19, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>언니가이드 근무표</div>
-          <div style={{ fontSize: 13, color: C.grey, marginBottom: 20 }}>{ALLOWED_EMAIL_DOMAIN} 계정으로 로그인해주세요</div>
-          {domainError && <div style={{ fontSize: 12, color: "#D94A1F", marginBottom: 12 }}>{domainError}</div>}
-          <button onClick={handleGoogleLogin} disabled={loginBusy}
-            style={{ width: "100%", background: C.black, color: C.white, border: "none", borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 14, cursor: loginBusy ? "default" : "pointer", fontFamily: font, opacity: loginBusy ? 0.6 : 1 }}>
-            {loginBusy ? "로그인 중…" : `${ALLOWED_EMAIL_DOMAIN} 계정으로 로그인`}
-          </button>
-        </div>
-      </div>
+      <AuthShell>
+        <div style={{ fontWeight: 800, fontSize: 22, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>로그인</div>
+        <div style={{ fontSize: 13, color: C.grey, marginBottom: 24 }}>언니가이드 근무앱에 오신 걸 환영합니다.</div>
+        {domainError && <div style={{ fontSize: 12, color: "#D94A1F", marginBottom: 12 }}>{domainError}</div>}
+        <button onClick={handleGoogleLogin} disabled={loginBusy}
+          style={{ width: "100%", background: C.orange, color: C.white, border: "none", borderRadius: 10, padding: "13px", fontWeight: 800, fontSize: 14, cursor: loginBusy ? "default" : "pointer", fontFamily: font, opacity: loginBusy ? 0.6 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          <GoogleG size={16} />
+          {loginBusy ? "로그인 중…" : "Google로 로그인"}
+        </button>
+        <div style={{ fontSize: 12, color: C.grey, marginTop: 14 }}>{ALLOWED_EMAIL_DOMAIN} 계정으로 로그인하세요.</div>
+      </AuthShell>
     );
   }
 
   // ── 프로필 확인 중 ────────────────────────────────────────────
   if (userProfile === undefined) {
     return (
-      <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ color: C.grey, fontWeight: 600, fontSize: 13 }}>확인 중…</div>
-      </div>
+      <AuthShell>
+        <div style={{ color: C.grey, fontWeight: 600, fontSize: 13, textAlign: "center" }}>확인 중…</div>
+      </AuthShell>
     );
   }
 
   // ── 최초 로그인: 이름 설정 화면 ───────────────────────────────
   if (userProfile === null) {
     return (
-      <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <form onSubmit={saveProfile} style={{ background: C.white, borderRadius: 16, padding: 32, width: 300, border: `1px solid ${C.line}`, boxShadow: "0 4px 20px rgba(13,13,13,0.06)", textAlign: "center" }}>
-          <div style={{ fontWeight: 800, fontSize: 19, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>처음 오셨네요!</div>
-          <div style={{ fontSize: 13, color: C.grey, marginBottom: 20 }}>근무표에 표시할 이름을 설정해주세요</div>
+      <AuthShell>
+        <form onSubmit={saveProfile}>
+          <div style={{ fontWeight: 800, fontSize: 22, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>처음 오셨네요!</div>
+          <div style={{ fontSize: 13, color: C.grey, marginBottom: 24 }}>근무표에 표시할 이름을 설정해주세요.</div>
           <input value={profileForm.koreanName} onChange={e => setProfileForm(p => ({ ...p, koreanName: e.target.value }))}
             style={{ width: "100%", border: `1px solid ${C.g2}`, borderRadius: 8, padding: "10px 12px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 8 }}
             placeholder="한글 이름 (예: 라라)" autoFocus />
@@ -685,11 +685,11 @@ export default function App() {
             style={{ width: "100%", border: `1px solid ${C.g2}`, borderRadius: 8, padding: "10px 12px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 12 }}
             placeholder="영어 이름 (예: Lara)" />
           <button type="submit" disabled={profileSaving || !profileForm.koreanName.trim() || !profileForm.englishName.trim()}
-            style={{ width: "100%", background: C.black, color: C.white, border: "none", borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 14, cursor: profileSaving ? "default" : "pointer", fontFamily: font, opacity: profileSaving ? 0.6 : 1 }}>
+            style={{ width: "100%", background: C.orange, color: C.white, border: "none", borderRadius: 10, padding: "13px", fontWeight: 800, fontSize: 14, cursor: profileSaving ? "default" : "pointer", fontFamily: font, opacity: profileSaving ? 0.6 : 1 }}>
             {profileSaving ? "저장 중…" : "시작하기"}
           </button>
         </form>
-      </div>
+      </AuthShell>
     );
   }
 
@@ -1383,6 +1383,45 @@ function CalendarView({ year, month, days, schedule, warnings, staff, altHoliday
         })}
       </div>
     </div>
+  );
+}
+
+// ── AuthShell (로그인/최초 프로필 설정 화면 공통 레이아웃) ─────
+function AuthShell({ children }) {
+  return (
+    <div style={{ fontFamily: font, minHeight: "100vh", display: "flex" }}>
+      <style>{`@media (max-width: 760px) { .auth-side-panel { display: none !important; } }`}</style>
+      <div className="auth-side-panel" style={{
+        flex: "0 0 42%", minHeight: "100vh", position: "relative", padding: 32,
+        background: `linear-gradient(135deg, ${C.orangeMid} 0%, ${C.orange} 55%, #E5572B 100%)`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+          <img src="/unni-arrow.png" alt="" style={{ width: 22, height: 22 }} />
+          <span style={{ color: C.white, fontWeight: 800, fontSize: 12, letterSpacing: "0.06em" }}>언니가이드 근무앱</span>
+        </div>
+        <div style={{ position: "absolute", left: 32, bottom: 36 }}>
+          <div style={{ color: C.white, fontWeight: 900, fontSize: 30, letterSpacing: "-0.02em" }}>언니가이드</div>
+          <div style={{ color: "rgba(255,255,255,0.85)", fontWeight: 600, fontSize: 13, marginTop: 4 }}>언니가이드 직원 근태기록</div>
+        </div>
+      </div>
+      <div style={{ flex: 1, minHeight: "100vh", background: C.white, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ width: 320 }}>
+          <img src="/unni-full-logo.png" alt="unni guide" style={{ width: 130, marginBottom: 28, marginLeft: -8 }} />
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GoogleG({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48">
+      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.5 29.5 4.5 24 4.5 12.9 4.5 3.5 13.9 3.5 25S12.9 45.5 24 45.5c11 0 20-8.9 20-20 0-1.7-.2-3.4-.4-5z"/>
+      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.5 29.5 4.5 24 4.5c-7.6 0-14.1 4.3-17.4 10.6z"/>
+      <path fill="#4CAF50" d="M24 45.5c5.4 0 10.3-1.9 14-5.1l-6.5-5.4c-2 1.4-4.6 2.3-7.5 2.3-5.3 0-9.7-3.4-11.3-8.1l-6.6 5.1C9.9 41.1 16.4 45.5 24 45.5z"/>
+      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4.3 5.6l6.5 5.4C40.8 36.4 44 31.3 44 25c0-1.7-.2-3.4-.4-4.5z"/>
+    </svg>
   );
 }
 
