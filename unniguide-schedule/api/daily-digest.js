@@ -1,86 +1,9 @@
 // 매일 아침 언니가이드 근무표 -> "오늘 출근 명단" Slack 알림.
 // Vercel Cron이 매일 이 라우트를 호출 (vercel.json 참고). AI 에이전트를 거치지 않는
 // 순수 서버 코드이며, 비밀값은 전부 Vercel 환경변수로 관리한다 (코드에 평문 없음).
+// 방 배정 로직은 재설계 예정이라 방 번호는 표시하지 않는다.
 
-const ROOMS = [1, 2, 4, 5, 6, 7, 8];
-const ZONE_ROOMS = { "영미": [1, 2, 4], "중국/대만": [5, 6], "태국": [7, 8] };
-const CONSULT_ORDER = ["제이디", "오브리", "렉시", "페니", "캔디스", "루미", "짜니", "프림", "마미"];
 const LANG_LABEL = { "영미": "영어", "중국/대만": "중국/대만", "태국": "태국", "일본": "일본" };
-const LANG_EMOJI = { "영미": "🇺🇸", "중국/대만": "🇨🇳", "태국": "🇹🇭", "일본": "🇯🇵" };
-
-function consultOrd(name) {
-  const i = CONSULT_ORDER.indexOf(name);
-  return i < 0 ? 999 : i;
-}
-
-// App.jsx의 roomMap useMemo 로직을 그대로 재현 (개인별 고정 홈룸 + 정원 초과분 동적배정 + 관리자 강제배치)
-function buildRoomMap(staff, schedule, overrides, today) {
-  const consultants = staff.filter((s) => s.active && s.type === "consultant" && !s.onlineOnly);
-  const ordered = [...consultants].sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
-
-  const home = {};
-  const homeUsed = new Set();
-  for (const s of ordered) {
-    if (homeUsed.size >= ROOMS.length) break;
-    const zonePref = (ZONE_ROOMS[s.lang] || []).filter((r) => !homeUsed.has(r));
-    const anyFree = ROOMS.filter((r) => !homeUsed.has(r));
-    const pick = zonePref.length ? zonePref[0] : anyFree[0];
-    if (pick != null) {
-      home[s.id] = pick;
-      homeUsed.add(pick);
-    }
-  }
-
-  const map = {};
-  consultants.forEach((s) => {
-    map[s.id] = {};
-  });
-  const prev = {};
-  for (let d = 1; d <= today; d++) {
-    const face = consultants
-      .filter((s) => (schedule[s.id] || [])[d] === "OFF-Con")
-      .sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
-    const used = new Set();
-    face.forEach((s) => {
-      if (home[s.id] != null && !used.has(home[s.id])) {
-        map[s.id][d] = home[s.id];
-        used.add(home[s.id]);
-        prev[s.id] = home[s.id];
-      }
-    });
-    face.forEach((s) => {
-      if (map[s.id][d] != null) return;
-      if (prev[s.id] != null && !used.has(prev[s.id])) {
-        map[s.id][d] = prev[s.id];
-        used.add(prev[s.id]);
-      }
-    });
-    face.forEach((s) => {
-      if (map[s.id][d] != null) return;
-      const freeAll = ROOMS.filter((r) => !used.has(r));
-      const freeZone = (ZONE_ROOMS[s.lang] || []).filter((r) => !used.has(r));
-      const pick = freeZone.length ? freeZone[0] : freeAll[0];
-      if (pick != null) {
-        map[s.id][d] = pick;
-        used.add(pick);
-      } else {
-        map[s.id][d] = 0;
-      }
-    });
-    face.forEach((s) => {
-      if (map[s.id][d]) prev[s.id] = map[s.id][d];
-    });
-  }
-
-  Object.keys(overrides || {}).forEach((sid) => {
-    map[sid] = map[sid] || {};
-    Object.entries(overrides[sid] || {}).forEach(([day, room]) => {
-      map[sid][day] = room;
-    });
-  });
-
-  return map;
-}
 
 async function signIn() {
   const res = await fetch(
@@ -115,28 +38,26 @@ async function buildDigest() {
   const mkey = `${year}-${String(month).padStart(2, "0")}`;
 
   const token = await signIn();
-  const [staffRaw, schedule, overrides] = await Promise.all([
+  const [staffRaw, schedule] = await Promise.all([
     dbGet(token, "staffList"),
     dbGet(token, `schedule/${mkey}`),
-    dbGet(token, `roomOverrides/${mkey}`),
   ]);
   const staff = staffRaw || [];
 
   const active = staff.filter((s) => s.active);
-  const roomMap = buildRoomMap(active, schedule || {}, overrides || {}, day);
   const statusOf = (sid) => ((schedule || {})[sid] || [])[day];
 
-  const workingConcierge = [];
+  const floor1 = [];
+  const floor2 = [];
   const workingByLang = {};
   const onlineOnly = [];
   const onVacation = [];
   for (const s of active) {
     const st = statusOf(s.id);
     if (s.type === "concierge") {
-      if (st && st !== "OFF" && st !== "") {
-        if (st === "VAC") onVacation.push(s.name);
-        else workingConcierge.push(s.name);
-      }
+      if (st === "R1") floor1.push(s.name);
+      else if (st === "R2") floor2.push(s.name);
+      else if (st === "VAC") onVacation.push(s.name);
       continue;
     }
     if (st === "VAC") {
@@ -149,37 +70,20 @@ async function buildDigest() {
       continue;
     }
     const lg = s.lang || "기타";
-    const room = (roomMap[s.id] || {})[day];
-    const label =
-      st === "OFF-Con" && room
-        ? `${s.name}(대면 no.${room})`
-        : st === "ON-Con"
-        ? `${s.name}(온라인)`
-        : `${s.name}(${st})`;
+    const label = st === "OFF-Con" ? `${s.name}(대면)` : st === "ON-Con" ? `${s.name}(온라인)` : `${s.name}(${st})`;
     (workingByLang[lg] = workingByLang[lg] || []).push(label);
   }
 
-  const faceCount = active.filter(
-    (s) => s.type === "consultant" && !s.onlineOnly && statusOf(s.id) === "OFF-Con"
-  ).length;
-  const short = active.filter(
-    (s) =>
-      s.type === "consultant" &&
-      !s.onlineOnly &&
-      statusOf(s.id) === "OFF-Con" &&
-      !(roomMap[s.id] || {})[day]
-  ).length;
-
-  const lines = [`📋 ${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}(${weekdayKo}) 출근 명단`, ""];
-  lines.push(`🏨 컨시어지: ${workingConcierge.length ? workingConcierge.join(", ") : "없음"}`);
+  const lines = [`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}(${weekdayKo}) 출근 명단`, ""];
+  lines.push(`1층 컨시어지: ${floor1.length ? floor1.join(", ") : "없음"}`);
+  lines.push(`2층 컨시어지: ${floor2.length ? floor2.join(", ") : "없음"}`);
   for (const lg of ["영미", "중국/대만", "태국", "일본"]) {
     const names = workingByLang[lg];
-    if (names && names.length) lines.push(`${LANG_EMOJI[lg] || ""} ${LANG_LABEL[lg] || lg}: ${names.join(", ")}`);
+    if (names && names.length) lines.push(`${LANG_LABEL[lg] || lg}: ${names.join(", ")}`);
   }
-  if (onlineOnly.length) lines.push(`🌏 온라인 전담: ${onlineOnly.join(", ")}`);
+  if (onlineOnly.length) lines.push(`온라인 전담: ${onlineOnly.join(", ")}`);
   lines.push("");
-  lines.push(`🏖️ 휴가: ${onVacation.length ? onVacation.join(", ") : "없음"}`);
-  lines.push(`⚠️ 방 부족: ${short === 0 ? "없음" : `${short}명 (대면 ${faceCount}/${ROOMS.length})`}`);
+  lines.push(`휴가: ${onVacation.length ? onVacation.join(", ") : "없음"}`);
 
   return lines.join("\n");
 }
@@ -196,14 +100,17 @@ export default async function handler(req, res) {
   try {
     text = await buildDigest();
   } catch (e) {
-    text = `⚠️ 출근 명단 생성 실패: ${e.message}`;
+    text = `출근 명단 생성 실패: ${e.message}`;
   }
 
   try {
     const slackRes = await fetch(process.env.SLACK_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({
+        text,
+        username: "Yong/용",
+      }),
     });
     if (!slackRes.ok) {
       res.status(502).json({ error: "slack_webhook_failed", status: slackRes.status });
