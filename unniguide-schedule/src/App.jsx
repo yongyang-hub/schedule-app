@@ -161,6 +161,16 @@ const fbCancelled = (y, m) => `cancelledHolidays/${y}-${String(m).padStart(2, "0
 const fbLogs      = (y, m) => `logs/${y}-${String(m).padStart(2, "0")}`;
 const fbRoomOverride = (y, m) => `roomOverrides/${y}-${String(m).padStart(2, "0")}`;
 const fbUserProfile  = (uid)   => `userProfiles/${uid}`;
+const fbJoinRequests = ()      => `joinRequests`;
+
+// 신규 로그인 사용자가 1차로 선택할 수 있는 역할 — GROUPS/LANG_GROUPS와 동일한 분류
+const ROLE_OPTIONS = [
+  { key: "concierge", label: "컨시어지",        type: "concierge", lang: null },
+  { key: "영미",      label: "영어 컨설턴트",     type: "consultant", lang: "영미" },
+  { key: "중국/대만",  label: "중국/대만 컨설턴트", type: "consultant", lang: "중국/대만" },
+  { key: "태국",      label: "태국 컨설턴트",     type: "consultant", lang: "태국" },
+  { key: "일본",      label: "일본어 컨설턴트",    type: "consultant", lang: "일본" },
+];
 
 export default function App() {
   const now = new Date();
@@ -189,9 +199,14 @@ export default function App() {
   const [userProfile, setUserProfile] = useState(undefined); // undefined=확인중 · null=최초로그인(설정 필요) · object={koreanName,englishName}
   const [profileForm,   setProfileForm]   = useState({ koreanName: "", englishName: "" });
   const [profileSaving, setProfileSaving] = useState(false);
+  const [joinRequests,  setJoinRequests]  = useState({}); // { [uid]: {email,koreanName,englishName,roleKey,roleLabel,type,lang,status,createdAt} }
+  const [roleSubmitting, setRoleSubmitting] = useState(false);
+  const [showApprovals, setShowApprovals] = useState(false);
   const userName = userProfile?.koreanName || "";
   const isAdmin = !!(authUser && ADMIN_EMAILS.includes(authUser.email));
   const myStaff = (authUser && staffList.find(s => s.email && s.email === authUser.email)) || null;
+  const myJoinRequest = (authUser && joinRequests[authUser.uid]) || null;
+  const pendingJoinRequests = Object.entries(joinRequests || {}).filter(([, r]) => r.status === "pending");
   const canEditStaff = sid => isAdmin || (myStaff && myStaff.id == sid); // 관리자는 전체, 일반 직원은 본인 줄만
 
   useEffect(() => authListen(setAuthUser), []);
@@ -320,8 +335,9 @@ export default function App() {
     });
 
     const u6 = dbListen(fbRoomOverride(year, month), val => setRoomOverrides(val || {}));
+    const u7 = dbListen(fbJoinRequests(), val => setJoinRequests(val || {}));
 
-    unsubRefs.current = [u1, u2, u3, u3b, u4, u5, u6];
+    unsubRefs.current = [u1, u2, u3, u3b, u4, u5, u6, u7];
     return () => unsubRefs.current.forEach(fn => fn());
   }, [year, month, authUser]);
 
@@ -607,6 +623,50 @@ export default function App() {
     setStaffModal(null);
   }
 
+  // 신규 로그인 사용자의 1차 역할 선택 → 승인 대기 상태로 등록
+  async function submitJoinRequest(roleKey) {
+    const role = ROLE_OPTIONS.find(r => r.key === roleKey);
+    if (!role || !authUser || !userProfile) return;
+    setRoleSubmitting(true);
+    try {
+      const req = {
+        uid: authUser.uid, email: authUser.email,
+        koreanName: userProfile.koreanName, englishName: userProfile.englishName,
+        roleKey: role.key, roleLabel: role.label, type: role.type, lang: role.lang,
+        status: "pending", createdAt: Date.now(),
+      };
+      await dbSet(`${fbJoinRequests()}/${authUser.uid}`, req);
+      setJoinRequests(p => ({ ...p, [authUser.uid]: req }));
+    } finally {
+      setRoleSubmitting(false);
+    }
+  }
+
+  // 관리자: 가입 신청 승인 → staffList에 신규 직원으로 등록 (saveStaff의 신규 추가 로직과 동일)
+  async function approveJoinRequest(uid) {
+    const req = joinRequests[uid];
+    if (!req) return;
+    const id = Date.now();
+    const s = { id, name: req.koreanName, nameEn: req.englishName, type: req.type, lang: req.lang, active: true, email: req.email };
+    const nl = [...staffList, s];
+    setStaffList(nl);
+    await dbSet(fbStaff(), nl);
+    const ns = { ...schedule, [id]: {} };
+    for (let d = 1; d <= days; d++) ns[id][d] = isClosedSunday(year, month, d) ? "OFF" : "";
+    await saveSchedule(ns);
+    await dbSet(`${fbJoinRequests()}/${uid}/status`, "approved");
+    setJoinRequests(p => ({ ...p, [uid]: { ...req, status: "approved" } }));
+    await addLog(`가입 승인: ${req.koreanName}(${req.englishName}) - ${req.roleLabel}`);
+  }
+
+  async function rejectJoinRequest(uid) {
+    const req = joinRequests[uid];
+    if (!req) return;
+    await dbSet(`${fbJoinRequests()}/${uid}/status`, "rejected");
+    setJoinRequests(p => ({ ...p, [uid]: { ...req, status: "rejected" } }));
+    await addLog(`가입 거절: ${req.koreanName}(${req.englishName})`);
+  }
+
   async function deleteStaff(id) {
     const s = staffList.find(x => x.id === id);
     const nl = staffList.filter(st => st.id !== id);
@@ -707,6 +767,39 @@ export default function App() {
     );
   }
 
+  // ── 역할 미배정: 역할 선택 또는 관리자 승인 대기 ──────────────
+  if (!isAdmin && !myStaff) {
+    if (myJoinRequest && myJoinRequest.status === "pending") {
+      return (
+        <AuthShell>
+          <div style={{ fontWeight: 800, fontSize: 22, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>승인 대기 중</div>
+          <div style={{ fontSize: 13, color: C.grey, marginBottom: 24, lineHeight: 1.7 }}>
+            신청하신 역할 <strong style={{ color: C.black }}>{myJoinRequest.roleLabel}</strong>을(를) 관리자가 확인하고 있어요.<br />승인되면 자동으로 근무표에 반영됩니다.
+          </div>
+          <span style={{ fontSize: 12, color: C.grey, cursor: "pointer", textDecoration: "underline" }} onClick={() => authLogout()}>로그아웃</span>
+        </AuthShell>
+      );
+    }
+    return (
+      <AuthShell>
+        <div style={{ fontWeight: 800, fontSize: 22, color: C.black, marginBottom: 6, letterSpacing: "-0.02em" }}>역할을 선택해주세요</div>
+        <div style={{ fontSize: 13, color: C.grey, marginBottom: 20, lineHeight: 1.6 }}>
+          {myJoinRequest?.status === "rejected" && <span style={{ color: "#D94A1F" }}>이전 신청이 승인되지 않았어요. 다시 선택해주세요.<br /></span>}
+          본인의 담당 역할을 선택하면 관리자 승인 후 근무표에 등록됩니다.
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {ROLE_OPTIONS.map(r => (
+            <button key={r.key} onClick={() => submitJoinRequest(r.key)} disabled={roleSubmitting}
+              style={{ width: "100%", background: C.white, color: C.black, border: `1px solid ${C.g2}`, borderRadius: 10, padding: "12px 14px", fontWeight: 700, fontSize: 14, cursor: roleSubmitting ? "default" : "pointer", fontFamily: font, textAlign: "left", opacity: roleSubmitting ? 0.6 : 1 }}>
+              {r.label}
+            </button>
+          ))}
+        </div>
+        <span style={{ display: "inline-block", marginTop: 20, fontSize: 12, color: C.grey, cursor: "pointer", textDecoration: "underline" }} onClick={() => authLogout()}>로그아웃</span>
+      </AuthShell>
+    );
+  }
+
   // ── 메인 화면 ─────────────────────────────────────────────────
   return (
     <div style={{ fontFamily: font, background: C.white, minHeight: "100vh", padding: 14 }}>
@@ -739,6 +832,11 @@ export default function App() {
             </Btn>
           )}
           {isAdmin && <Btn onClick={() => setStaffModal({ mode: "add" })}>직원 추가</Btn>}
+          {isAdmin && (
+            <Btn onClick={() => setShowApprovals(v => !v)} style={pendingJoinRequests.length > 0 ? { background: C.orange, border: "none", color: C.white } : {}}>
+              가입 승인{pendingJoinRequests.length > 0 && <span style={{ background: C.white, color: C.orange, borderRadius: 10, padding: "1px 6px", fontSize: 10, marginLeft: 5, fontWeight: 800 }}>{pendingJoinRequests.length}</span>}
+            </Btn>
+          )}
           <Btn onClick={() => setShowLogs(v => !v)} style={showLogs ? { background: C.g1 } : {}}>
             로그{logs.length > 0 && <span style={{ background: C.orange, color: C.white, borderRadius: 10, padding: "1px 6px", fontSize: 10, marginLeft: 5 }}>{logs.length}</span>}
           </Btn>
@@ -758,6 +856,24 @@ export default function App() {
               <span style={{ background: C.g1, color: C.g6, borderRadius: 6, padding: "2px 7px", fontWeight: 700, whiteSpace: "nowrap", fontSize: 11 }}>{log.user}</span>
               <span style={{ color: C.grey, whiteSpace: "nowrap", fontSize: 11 }}>{fmtTime(log.ts)}</span>
               <span style={{ color: C.black, flex: 1 }}>{log.action}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 가입 승인 패널 (관리자 전용) */}
+      {isAdmin && showApprovals && (
+        <div style={{ background: C.white, borderRadius: 12, padding: 16, marginBottom: 12, border: `1px solid ${C.line}`, maxHeight: 300, overflowY: "auto" }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: C.black, marginBottom: 10 }}>가입 승인 대기</div>
+          {pendingJoinRequests.length === 0 && <div style={{ color: C.grey, fontSize: 12, textAlign: "center", padding: "12px 0" }}>대기 중인 신청이 없어요</div>}
+          {pendingJoinRequests.map(([uid, req]) => (
+            <div key={uid} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: `1px solid ${C.g1}` }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 800, fontSize: 13, color: C.black }}>{req.koreanName} <span style={{ color: C.g4, fontWeight: 600 }}>{req.englishName}</span></div>
+                <div style={{ fontSize: 11, color: C.grey }}>{req.email} · 신청 역할: {req.roleLabel}</div>
+              </div>
+              <button onClick={() => approveJoinRequest(uid)} style={{ background: C.black, color: C.white, border: "none", borderRadius: 8, padding: "7px 12px", fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: font }}>승인</button>
+              <button onClick={() => rejectJoinRequest(uid)} style={{ background: C.white, color: C.g5, border: `1px solid ${C.g2}`, borderRadius: 8, padding: "7px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: font }}>거절</button>
             </div>
           ))}
         </div>
@@ -1361,6 +1477,8 @@ function CalendarView({ year, month, days, schedule, warnings, staff, altHoliday
   warnings.forEach(w => { if (!warnMap[w.day]) warnMap[w.day] = []; warnMap[w.day].push(w.msg); });
   const cells = [...Array(firstDow).fill(null), ...Array.from({ length: days }, (_, i) => i + 1)];
   const today = new Date();
+  const isCurrentMonth = today.getFullYear() === year && today.getMonth() + 1 === month;
+  const todayRow = isCurrentMonth ? Math.floor((firstDow + today.getDate() - 1) / 7) : -1;
 
   return (
     <div style={{ background: C.white, borderRadius: 12, padding: 14, border: `1px solid ${C.line}` }}>
@@ -1373,11 +1491,12 @@ function CalendarView({ year, month, days, schedule, warnings, staff, altHoliday
           const dow     = new Date(year, month - 1, d).getDay();
           const isAlt   = altHolidays.has(d);
           const working = staff.filter(s => schedule[s.id]?.[d] && !["OFF", ""].includes(schedule[s.id][d]));
-          const isToday = today.getFullYear() === year && today.getMonth() + 1 === month && today.getDate() === d;
+          const isToday = isCurrentMonth && today.getDate() === d;
+          const inTodayRow = todayRow === Math.floor(i / 7);
           const isClosed = isAlt || isClosedSunday(year, month, d); // 미운영일(일요일 오픈 전·휴일)
           return (
             <div key={d} onClick={() => onDayClick(d)}
-              style={{ border: `${isToday ? 2 : 1}px solid ${isToday ? C.orange : C.line}`, borderRadius: 8, padding: "5px 6px", minHeight: 80, background: isClosed ? C.g1 : C.white, cursor: "pointer" }}>
+              style={{ border: `${isToday ? 2 : 1}px solid ${isToday ? C.orange : C.line}`, borderRadius: 8, padding: "5px 6px", minHeight: 80, background: isClosed ? C.g1 : inTodayRow ? C.orangeLight : C.white, cursor: "pointer" }}>
               <div style={{ fontWeight: 800, fontSize: 13, color: isClosed ? C.grey : C.black, marginBottom: 3, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span>{d}</span>
                 {(isAlt || warnMap[d]) && <span style={{ width: 5, height: 5, borderRadius: "50%", background: isAlt ? C.plumMid : C.orangeDark, display: "inline-block" }} />}
