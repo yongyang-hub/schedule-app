@@ -99,7 +99,7 @@ async function buildDigest() {
     (workingByLang[lg] = workingByLang[lg] || []).push(label);
   }
 
-  const lines = [`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}(${weekdayKo}) 출근 명단`, ""];
+  const lines = [`📅 *${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}(${weekdayKo}) 출근 명단*`, ""];
   lines.push(`*1층 컨시어지:* ${floor1.length ? floor1.join(", ") : "없음"}`);
   lines.push(`*2층 컨시어지:* ${floor2.length ? floor2.join(", ") : "없음"}`);
   for (const lg of ["영미", "중국/대만", "태국", "일본"]) {
