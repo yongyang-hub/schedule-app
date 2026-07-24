@@ -715,7 +715,7 @@ export default function App() {
       <div style={{ background: C.white, border: `1px solid ${C.line}`, borderRadius: 14, padding: "14px 18px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <img src="/unni-logo.jpeg" alt="언니가이드" style={{ width: 30, height: 30, objectFit: "contain" }} />
+            <img src="/unni-arrow.png" alt="언니가이드" style={{ width: 26, height: 26, objectFit: "contain" }} />
             <span style={{ fontSize: 19, fontWeight: 800, color: C.black, letterSpacing: "-0.02em" }}>
               언니가이드 <span style={{ color: C.orange }}>근무표</span>
             </span>
@@ -1415,7 +1415,7 @@ function AuthShell({ children }) {
       </div>
       <div style={{ flex: 1, minHeight: "100vh", background: C.white, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ width: 320 }}>
-          <img src="/unni-full-logo.png" alt="unni guide" style={{ width: 130, marginBottom: 28, marginLeft: -8 }} />
+          <img src="/unni-arrow.png" alt="언니가이드" style={{ width: 40, height: 40, marginBottom: 24 }} />
           {children}
         </div>
       </div>
