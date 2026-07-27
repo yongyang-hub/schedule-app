@@ -1,7 +1,7 @@
 
 import { initializeApp } from 'firebase/app';
 import { getDatabase, ref, set, get, onValue } from 'firebase/database';
-import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserSessionPersistence } from 'firebase/auth';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -16,6 +16,8 @@ const app = initializeApp(firebaseConfig);
 
 const db = getDatabase(app);
 const auth = getAuth(app);
+// 브라우저 탭/창을 닫으면 세션이 사라지도록 — 다시 열면 재로그인 필요
+setPersistence(auth, browserSessionPersistence).catch(() => {});
 
 export async function dbGet(path) { const snap = await get(ref(db, path)); return snap.exists() ? snap.val() : null; }
 
