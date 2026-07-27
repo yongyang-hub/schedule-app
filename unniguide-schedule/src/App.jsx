@@ -762,6 +762,8 @@ export default function App() {
 
   const dayHeaders  = Array.from({ length: days }, (_, i) => { const d = i + 1, dow = new Date(year, month - 1, d).getDay(); return { d, dow }; });
   const roleLabel   = s => s.type === "concierge" ? "컨시어지" : "컨설턴트";
+  const realToday = new Date();
+  const isCurrentRealMonth = realToday.getFullYear() === year && realToday.getMonth() + 1 === month;
 
   // ── 인증 확인 중 ──────────────────────────────────────────────
   if (authUser === undefined) {
@@ -1044,13 +1046,14 @@ export default function App() {
                   const isAlt       = altHolidays.has(d);
                   const isClosed    = isPub || isAlt || isClosedSunday(year, month, d); // 일요일(오픈 전)·공휴일·지정휴일 = 미운영
                   const dot         = isPub ? C.orange : isAlt ? C.plumMid : warnDays.has(d) ? C.orangeDark : null;
+                  const isToday     = isCurrentRealMonth && realToday.getDate() === d;
                   return (
                     <th key={d} onClick={() => setDayPopup(d)}
-                      style={{ ...th("32px"), background: isClosed ? C.g1 : C.white, color: isClosed ? C.grey : C.g7, cursor: "pointer" }}>
+                      style={{ ...th("32px"), background: isToday ? C.orange : isClosed ? C.g1 : C.white, color: isToday ? C.white : isClosed ? C.grey : C.g7, cursor: "pointer", boxShadow: isToday ? `inset 0 0 0 2px ${C.orangeDark}` : "none" }}>
                       <div style={{ fontWeight: 800 }}>{d}</div>
                       <div style={{ fontSize: 9, fontWeight: 400 }}>{DAYS_KO[dow]}</div>
                       <div style={{ height: 5, marginTop: 1, display: "flex", justifyContent: "center" }}>
-                        {dot && <span style={{ width: 4, height: 4, borderRadius: "50%", background: dot, display: "inline-block" }} />}
+                        {dot && <span style={{ width: 4, height: 4, borderRadius: "50%", background: isToday ? C.white : dot, display: "inline-block" }} />}
                       </div>
                     </th>
                   );
