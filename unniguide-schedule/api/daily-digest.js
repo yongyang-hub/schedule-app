@@ -76,19 +76,24 @@ async function buildDigest() {
   const workingByLang = {};
   const onlineOnly = [];
   const onVacation = [];
+  const onOff = [];
   for (const s of active) {
     const st = statusOf(s.id);
     if (s.type === "concierge") {
       if (st === "R1") floor1.push(mention(s.name));
       else if (st === "R2") floor2.push(mention(s.name));
       else if (st === "VAC") onVacation.push(mention(s.name));
+      else if (!st || st === "OFF") onOff.push(s.name);
       continue;
     }
     if (st === "VAC") {
       onVacation.push(mention(s.name));
       continue;
     }
-    if (!st || st === "OFF") continue;
+    if (!st || st === "OFF") {
+      onOff.push(s.name);
+      continue;
+    }
     if (s.onlineOnly) {
       onlineOnly.push(mention(s.name));
       continue;
@@ -108,6 +113,7 @@ async function buildDigest() {
   }
   if (onlineOnly.length) lines.push(`*온라인 전담:* ${onlineOnly.join(", ")}`);
   lines.push("");
+  lines.push(`*OFF:* ${onOff.length ? onOff.join(", ") : "없음"}`);
   lines.push(`*휴가:* ${onVacation.length ? onVacation.join(", ") : "없음"}`);
 
   return lines.join("\n");
