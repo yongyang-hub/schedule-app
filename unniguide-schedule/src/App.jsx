@@ -3,6 +3,8 @@ import { dbGet, dbSet, dbListen, authListen, authGoogleLogin, authLogout } from 
 
 const ALLOWED_EMAIL_DOMAIN = "healingpaper.com";
 const ADMIN_EMAILS = ["yong.yang@healingpaper.com", "moka.lee@healingpaper.com"];
+const INACTIVITY_LIMIT_MS = 8 * 60 * 60 * 1000; // 8시간 무활동 시 자동 로그아웃
+const LAST_ACTIVITY_KEY = "ug_last_activity";
 
 // 예전 이메일/비밀번호 계정 → 한글 이름 (최초 프로필 설정 시 이름 자동완성용, 소스오브트루스는 아님)
 const EMAIL_TO_NAME = {
@@ -210,6 +212,40 @@ export default function App() {
   const canEditStaff = sid => isAdmin || (myStaff && myStaff.id == sid); // 관리자는 전체, 일반 직원은 본인 줄만
 
   useEffect(() => authListen(setAuthUser), []);
+
+  // 8시간 무활동 시 자동 로그아웃 — 마지막 활동 시각을 localStorage에 기록해두고
+  // 활동 이벤트·주기적 체크·탭 복귀 시 체크에서 기준 초과하면 즉시 로그아웃
+  useEffect(() => {
+    if (!authUser) return;
+
+    const markActivity = () => localStorage.setItem(LAST_ACTIVITY_KEY, String(Date.now()));
+    const checkInactivity = () => {
+      const last = Number(localStorage.getItem(LAST_ACTIVITY_KEY)) || Date.now();
+      if (Date.now() - last > INACTIVITY_LIMIT_MS) authLogout();
+    };
+
+    markActivity();
+    checkInactivity();
+
+    let throttled = false;
+    const onActivity = () => {
+      if (throttled) return;
+      throttled = true;
+      setTimeout(() => { throttled = false; }, 30000); // 활동 기록은 30초에 한 번만
+      markActivity();
+    };
+
+    const events = ["mousemove", "mousedown", "keydown", "touchstart", "scroll"];
+    events.forEach(ev => window.addEventListener(ev, onActivity, { passive: true }));
+    document.addEventListener("visibilitychange", checkInactivity);
+    const interval = setInterval(checkInactivity, 60 * 1000);
+
+    return () => {
+      events.forEach(ev => window.removeEventListener(ev, onActivity));
+      document.removeEventListener("visibilitychange", checkInactivity);
+      clearInterval(interval);
+    };
+  }, [authUser]);
 
   // 로그인 상태가 바뀌면: 도메인 검증 후 프로필(userProfiles/{uid}) 조회
   useEffect(() => {
