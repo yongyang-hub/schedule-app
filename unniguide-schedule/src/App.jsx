@@ -700,25 +700,34 @@ export default function App() {
   async function approveJoinRequest(uid) {
     const req = joinRequests[uid];
     if (!req) return;
-    const id = Date.now();
-    const s = { id, name: req.koreanName, nameEn: req.englishName, type: req.type, lang: req.lang, active: true, email: req.email };
-    const nl = [...staffList, s];
-    setStaffList(nl);
-    await dbSet(fbStaff(), nl);
-    const ns = { ...schedule, [id]: {} };
-    for (let d = 1; d <= days; d++) ns[id][d] = isClosedSunday(year, month, d) ? "OFF" : "";
-    await saveSchedule(ns);
-    await dbSet(`${fbJoinRequests()}/${uid}/status`, "approved");
-    setJoinRequests(p => ({ ...p, [uid]: { ...req, status: "approved" } }));
-    await addLog(`가입 승인: ${req.koreanName}(${req.englishName}) - ${req.roleLabel}`);
+    try {
+      const id = Date.now();
+      const s = { id, name: req.koreanName, nameEn: req.englishName, type: req.type, lang: req.lang, active: true, email: req.email };
+      const nl = [...staffList, s];
+      await dbSet(fbStaff(), nl); // DB 저장 먼저 — 성공해야만 화면 상태를 바꾸고 승인 처리로 넘어감
+      setStaffList(nl);
+      const ns = { ...schedule, [id]: {} };
+      for (let d = 1; d <= days; d++) ns[id][d] = isClosedSunday(year, month, d) ? "OFF" : "";
+      await dbSet(fbSchedule(year, month), ns);
+      setSchedule(ns);
+      await dbSet(`${fbJoinRequests()}/${uid}/status`, "approved");
+      setJoinRequests(p => ({ ...p, [uid]: { ...req, status: "approved" } }));
+      await addLog(`가입 승인: ${req.koreanName}(${req.englishName}) - ${req.roleLabel}`);
+    } catch (e) {
+      alert(`승인 처리 중 오류가 발생했습니다: ${e.message}\n다시 시도해주세요.`);
+    }
   }
 
   async function rejectJoinRequest(uid) {
     const req = joinRequests[uid];
     if (!req) return;
-    await dbSet(`${fbJoinRequests()}/${uid}/status`, "rejected");
-    setJoinRequests(p => ({ ...p, [uid]: { ...req, status: "rejected" } }));
-    await addLog(`가입 거절: ${req.koreanName}(${req.englishName})`);
+    try {
+      await dbSet(`${fbJoinRequests()}/${uid}/status`, "rejected");
+      setJoinRequests(p => ({ ...p, [uid]: { ...req, status: "rejected" } }));
+      await addLog(`가입 거절: ${req.koreanName}(${req.englishName})`);
+    } catch (e) {
+      alert(`거절 처리 중 오류가 발생했습니다: ${e.message}\n다시 시도해주세요.`);
+    }
   }
 
   async function deleteStaff(id) {
