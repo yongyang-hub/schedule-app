@@ -126,7 +126,7 @@ function initSchedule(staff, y, m) {
   staff.forEach(st => {
     s[st.id] = {};
     for (let i = 1; i <= d; i++) {
-      s[st.id][i] = (isClosedSunday(y, m, i) || pubHols.has(i)) ? "OFF" : (st.onlineOnly ? "ON-Con" : "");
+      s[st.id][i] = (isClosedSunday(y, m, i) || pubHols.has(i) || !st.active) ? "OFF" : (st.onlineOnly ? "ON-Con" : "");
     }
   });
   return s;
@@ -603,18 +603,47 @@ export default function App() {
     await addLog(`일괄입력: ${names} / ${dList.length}일 ${STATUS_CONFIG[status]?.label || "비우기"}${offDays.length > 0 ? ` + OFF ${offDays.length}일` : ""}`);
   }
 
-  async function deactivateStaff(id) {
+  // 비활성 처리되는 사람의 "오늘 이후" 스케줄을 전부 OFF로 반영 (그 이전 근무 이력은 그대로 보존).
+  // 현재 조회 중인 달이 실제 이번달이면 그 달만 즉시 패치, 이미 존재하는 미래 달들도 전부 OFF로 채움.
+  async function blankFutureToOff(id) {
+    const now = new Date();
+    const ry = now.getFullYear(), rm = now.getMonth() + 1, rd = now.getDate();
+    const isViewedRealMonth = year === ry && month === rm;
+    if (isViewedRealMonth) {
+      const ns = { ...schedule, [id]: { ...(schedule[id] || {}) } };
+      for (let d = rd; d <= days; d++) ns[id][d] = "OFF";
+      await saveSchedule(ns);
+    } else {
+      const daysInRealMonth = getDays(ry, rm);
+      const personSched = { ...((await dbGet(fbSchedule(ry, rm))) || {})[id] };
+      for (let d = rd; d <= daysInRealMonth; d++) personSched[d] = "OFF";
+      await dbSet(`${fbSchedule(ry, rm)}/${id}`, personSched);
+    }
+    const curKey = `${ry}-${String(rm).padStart(2, "0")}`;
+    const allSchedules = (await dbGet("schedule")) || {};
+    for (const mkey of Object.keys(allSchedules)) {
+      if (mkey <= curKey) continue; // 과거·이번달은 위에서 이미 처리했거나 건드리지 않음
+      const [fy, fm] = mkey.split("-").map(Number);
+      const daysInMonth = getDays(fy, fm);
+      const personSched = {};
+      for (let d = 1; d <= daysInMonth; d++) personSched[d] = "OFF";
+      await dbSet(`schedule/${mkey}/${id}`, personSched);
+    }
+  }
+
+  async function deactivateStaff(id, { onLeave = false } = {}) {
     const s = staffList.find(x => x.id === id);
-    const nl = staffList.map(st => st.id === id ? { ...st, active: false } : st);
+    const nl = staffList.map(st => st.id === id ? { ...st, active: false, onLeave } : st);
     setStaffList(nl);
     await dbSet(fbStaff(), nl);
-    await addLog(`${s?.name}(${s?.nameEn}) 합류 미확정으로 변경`);
+    await blankFutureToOff(id);
+    await addLog(`${s?.name}(${s?.nameEn}) ${onLeave ? "휴직 처리" : "합류 미확정으로 변경"} (이전 근무 이력 보존, 이후 전부 OFF)`);
     setLongPressTarget(null);
   }
 
   async function activateStaff(id) {
     const s = staffList.find(x => x.id === id);
-    const nl = staffList.map(st => st.id === id ? { ...st, active: true } : st);
+    const nl = staffList.map(st => st.id === id ? { ...st, active: true, onLeave: false } : st);
     setStaffList(nl);
     await dbSet(fbStaff(), nl);
     if (!schedule[id]) {
@@ -956,7 +985,7 @@ export default function App() {
           <strong>합류 미확정</strong>
           {staffList.filter(s => !s.active).map(s => (
             <span key={s.id} style={{ background: C.white, border: `1px solid ${C.g2}`, borderRadius: 6, padding: "2px 10px", cursor: "pointer", fontWeight: 600, color: C.black }}
-              onClick={() => activateStaff(s.id)}>{s.name} {s.nameEn} ({s.lang || "컨시어지"}) +</span>
+              onClick={() => activateStaff(s.id)}>{s.name} {s.nameEn} ({s.lang || "컨시어지"}){s.onLeave && <span style={{ color: C.orangeDark }}> · 휴직</span>} +</span>
           ))}
         </div>
       )}
@@ -1253,12 +1282,15 @@ export default function App() {
 
             {s?.active ? (
               <>
-                <div style={{ fontSize: 12, color: C.g6, textAlign: "center", marginBottom: 14, background: C.g1, borderRadius: 8, padding: "8px 12px" }}>근무표에서 제외하고 <strong>합류 미확정</strong>으로 이동합니다. (데이터는 보존)</div>
-                <button onClick={() => deactivateStaff(longPressTarget)} style={{ width: "100%", background: C.white, color: C.black, border: `1px solid ${C.g2}`, borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: font, marginBottom: 8 }}>합류 미확정으로 내리기</button>
+                <div style={{ fontSize: 12, color: C.g6, textAlign: "center", marginBottom: 14, background: C.g1, borderRadius: 8, padding: "8px 12px", lineHeight: 1.6 }}>
+                  근무표에서 제외됩니다. <strong>이전 근무 이력은 보존</strong>되고, 오늘 이후 일정은 전부 OFF로 반영됩니다.
+                </div>
+                <button onClick={() => deactivateStaff(longPressTarget, { onLeave: true })} style={{ width: "100%", background: C.orange, color: C.white, border: "none", borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: font, marginBottom: 8 }}>휴직 처리 (기존 직원)</button>
+                <button onClick={() => deactivateStaff(longPressTarget, { onLeave: false })} style={{ width: "100%", background: C.white, color: C.black, border: `1px solid ${C.g2}`, borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: font, marginBottom: 8 }}>합류 미확정으로 내리기 (신규 합류 보류)</button>
               </>
             ) : (
               <>
-                <div style={{ fontSize: 12, color: C.g6, textAlign: "center", marginBottom: 14, background: C.g1, borderRadius: 8, padding: "8px 12px" }}><strong>합류 미확정</strong> 상태입니다.</div>
+                <div style={{ fontSize: 12, color: C.g6, textAlign: "center", marginBottom: 14, background: C.g1, borderRadius: 8, padding: "8px 12px" }}><strong>{s?.onLeave ? "휴직" : "합류 미확정"}</strong> 상태입니다.</div>
                 <button onClick={() => { activateStaff(longPressTarget); closePopup(); }} style={{ width: "100%", background: C.orange, color: C.white, border: "none", borderRadius: 8, padding: "11px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: font, marginBottom: 8 }}>근무표에 다시 추가</button>
               </>
             )}
