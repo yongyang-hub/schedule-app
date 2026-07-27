@@ -559,6 +559,31 @@ export default function App() {
 
   const warnDays = new Set(warnings.map(w => w.day));
 
+  // 이번주 하이라이트 — 실제 오늘이 속한 주(일~토)만, 조회 중인 월이 이번달일 때만 표시
+  const weeklyHighlights = useMemo(() => {
+    if (!schedule) return null;
+    const nowD = new Date();
+    if (nowD.getFullYear() !== year || nowD.getMonth() + 1 !== month) return null;
+    const weekStart = nowD.getDate() - nowD.getDay();
+    const weekEnd = weekStart + 6;
+    const weekDays = [];
+    for (let d = 1; d <= days; d++) if (d >= weekStart && d <= weekEnd) weekDays.push(d);
+
+    const vacations = [];
+    activeStaff.forEach(s => {
+      weekDays.forEach(d => {
+        const st = schedule[s.id]?.[d];
+        if (st === "VAC" || st === "VAC-AM" || st === "VAC-PM") {
+          vacations.push({ name: s.name, day: d, label: STATUS_CONFIG[st]?.short || st });
+        }
+      });
+    });
+
+    const weekWarnings = warnings.filter(w => weekDays.includes(w.day));
+
+    return { weekDays, vacations, weekWarnings };
+  }, [schedule, year, month, days, activeStaff, warnings]);
+
   async function changeMonth(delta) {
     let m = month + delta, y = year;
     if (m > 12) { m = 1; y++; }
@@ -843,6 +868,22 @@ export default function App() {
           <Btn onClick={downloadBackup}>백업</Btn>
         </div>
       </div>
+
+      {/* 이번주 하이라이트 */}
+      {weeklyHighlights && (
+        <div style={{ background: C.plumLight, border: `1px solid ${C.plumMid}40`, borderRadius: 10, padding: "10px 14px", marginBottom: 10, fontSize: 12, color: C.plum }}>
+          <div style={{ fontWeight: 800, marginBottom: 6 }}>
+            이번주 하이라이트 <span style={{ fontWeight: 600, color: C.g5 }}>({month}/{weeklyHighlights.weekDays[0]} ~ {month}/{weeklyHighlights.weekDays[weeklyHighlights.weekDays.length - 1]})</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div><strong>휴가·반차</strong>: {weeklyHighlights.vacations.length === 0 ? "없음" : weeklyHighlights.vacations.map(v => `${v.name}(${month}/${v.day} ${v.label})`).join(", ")}</div>
+            <div><strong>배치 주의</strong>: {weeklyHighlights.weekWarnings.length === 0 ? "없음" : `${weeklyHighlights.weekWarnings.length}건 · ` + weeklyHighlights.weekWarnings.slice(0, 6).map(w => `${month}/${w.day} ${w.msg}`).join(", ") + (weeklyHighlights.weekWarnings.length > 6 ? ` 외 ${weeklyHighlights.weekWarnings.length - 6}건` : "")}</div>
+            {isAdmin && (
+              <div><strong>가입 승인 대기</strong>: {pendingJoinRequests.length === 0 ? "없음" : `${pendingJoinRequests.length}건 · ` + pendingJoinRequests.map(([, r]) => `${r.koreanName}(${r.roleLabel})`).join(", ")}</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 로그 패널 */}
       {showLogs && (
