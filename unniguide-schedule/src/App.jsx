@@ -738,7 +738,7 @@ export default function App() {
     if (!req) return;
     try {
       const id = Date.now();
-      const s = { id, name: req.koreanName, nameEn: req.englishName, type: req.type, lang: req.lang, active: true, email: req.email };
+      const s = { id, name: req.koreanName, nameEn: req.englishName, type: req.type, lang: req.lang ?? null, active: true, email: req.email };
       const nl = [...staffList, s];
       await dbSet(fbStaff(), nl); // DB 저장 먼저 — 성공해야만 화면 상태를 바꾸고 승인 처리로 넘어감
       setStaffList(nl);
