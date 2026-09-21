@@ -1,5 +1,9 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { dbGet, dbSet, dbListen, authListen, authGoogleLogin, authLogout } from "./firebase";
+import {
+  KR_HOLIDAYS, getDays, isClosedSunday, closedSundaysOf,
+  makeCalendar, computeBaseline, capacityNotes, evaluatePerson,
+} from '../lib/workload.js';
 
 const ALLOWED_EMAIL_DOMAIN = "healingpaper.com";
 const ADMIN_EMAILS = ["yong.yang@healingpaper.com", "moka.lee@healingpaper.com"];
@@ -81,28 +85,7 @@ const C = {
   line:"#E8E8E8",   g1:"#F5F5F5", g2:"#D4D4D4", g3:"#B3B3B3", g5:"#717171", g6:"#4F4F4F", g7:"#2E2E2E",
 };
 
-const getDays     = (y, m) => new Date(y, m, 0).getDate();
 const getFirstDow = (y, m) => new Date(y, m - 1, 1).getDay();
-
-// 일요일 운영 시작일(이 날짜 이상의 일요일부터 근무일). 그 전 일요일은 미운영(자동 OFF·회색).
-const SUNDAY_OPEN = 20260613;
-const isClosedSunday = (y, m, d) =>
-  new Date(y, m - 1, d).getDay() === 0 && (y * 10000 + m * 100 + d) < SUNDAY_OPEN;
-
-// 대한민국 공휴일 (연도 → 월 → 일 배열)
-const KR_HOLIDAYS = {
-  2026: {
-    1:  [1],              // 신정
-    2:  [16, 17, 18],     // 설날 연휴
-    3:  [1],              // 삼일절
-    5:  [5, 24],          // 어린이날, 부처님오신날
-    6:  [6],              // 현충일
-    8:  [15],             // 광복절
-    9:  [24, 25, 26],     // 추석 연휴
-    10: [3, 9],           // 개천절, 한글날
-    12: [25],             // 성탄절
-  },
-};
 
 const HOLIDAY_NAMES = {
   "2026-1-1":   "신정",
@@ -193,7 +176,6 @@ export default function App() {
   const [logs,      setLogs]      = useState([]);
   const [showLogs,  setShowLogs]  = useState(false);
   const [loading,   setLoading]   = useState(true);
-  const [prevSchedule, setPrevSchedule] = useState(null);
   const [roomOverrides, setRoomOverrides] = useState({}); // { [staffId]: { [day]: roomNumber } } — 강제배치
   const [authUser,    setAuthUser]    = useState(undefined); // undefined=확인중 · null=미로그인 · object=로그인됨
   const [domainError, setDomainError] = useState("");
@@ -299,10 +281,6 @@ export default function App() {
   const unsubRefs = useRef([]);
 
   const days         = getDays(year, month);
-  const prevMonth    = month === 1 ? 12 : month - 1;
-  const prevYear     = month === 1 ? year - 1 : year;
-  const prevMonthDays = getDays(prevYear, prevMonth);
-  const prevPubHols  = new Set(KR_HOLIDAYS[prevYear]?.[prevMonth] || []);
   const activeStaff  = staffList.filter(s => s.active);
   const displayStaff = showInactive ? staffList : activeStaff;
   const ym = year * 100 + month;
@@ -337,7 +315,17 @@ export default function App() {
           norm[sid] = {};
           Object.keys(val[sid]).forEach(d => { norm[sid][d] = val[sid][d]; });
         });
+        // 일요일 전면 휴무 정규화 — SUNDAY_CLOSE 이후 일요일에 이미 저장돼 있던 근무 셀을 OFF로 덮어쓴다.
+        // 바뀐 게 있을 때만 DB에 되써서, 리스너가 다시 돌아도 두 번째부터는 no-op이 된다.
+        const sunOff = closedSundaysOf(year, month);
+        let sunFixed = false;
+        if (sunOff.length) {
+          Object.keys(norm).forEach(sid => {
+            sunOff.forEach(d => { if (norm[sid][d] !== "OFF") { norm[sid][d] = "OFF"; sunFixed = true; } });
+          });
+        }
         setSchedule(norm);
+        if (sunFixed) dbSet(fbSchedule(year, month), norm).catch(() => {});
       } else {
         const init = initSchedule(staffList, year, month);
         setSchedule(init);
@@ -355,25 +343,10 @@ export default function App() {
     const u4 = dbListen(fbLogs(year, month), val => {
       if (val) setLogs(Object.values(val).sort((a, b) => b.ts - a.ts).slice(0, 100));
     });
-    const prevM = month === 1 ? 12 : month - 1;
-    const prevY = month === 1 ? year - 1 : year;
-    const u5 = dbListen(fbSchedule(prevY, prevM), val => {
-      if (val) {
-        const norm = {};
-        Object.keys(val).forEach(sid => {
-          norm[sid] = {};
-          Object.keys(val[sid]).forEach(d => { norm[sid][d] = val[sid][d]; });
-        });
-        setPrevSchedule(norm);
-      } else {
-        setPrevSchedule({});
-      }
-    });
-
     const u6 = dbListen(fbRoomOverride(year, month), val => setRoomOverrides(val || {}));
     const u7 = dbListen(fbJoinRequests(), val => setJoinRequests(val || {}));
 
-    unsubRefs.current = [u1, u2, u3, u3b, u4, u5, u6, u7];
+    unsubRefs.current = [u1, u2, u3, u3b, u4, u6, u7];
     return () => unsubRefs.current.forEach(fn => fn());
   }, [year, month, authUser]);
 
@@ -404,6 +377,8 @@ export default function App() {
   }
 
   async function setStatus(sid, day, st) {
+    // 미운영 일요일은 전체 공통 OFF 고정 — 다른 상태로 바꾸려는 시도는 무시한다.
+    if (isClosedSunday(year, month, day) && st !== "OFF") return;
     const prev = schedule[sid]?.[day] ?? "";
     const s = staffList.find(x => x.id == sid);
     await saveSchedule({ ...schedule, [sid]: { ...schedule[sid], [day]: st } });
@@ -454,48 +429,44 @@ export default function App() {
     }
   }
 
-  // 근무 가중치: 0(미근무) · 0.5(반차) · 1(정상근무) — 초과근무 계산용
-  function workValue(staffId, d) {
-    const sObj = staffList.find(x => x.id === staffId);
-    if (sObj && phaseOf(sObj, d) !== "active") return 0; // 미합류/온보딩은 근무 카운트 제외
-    if (isClosedSunday(year, month, d)) return 0; // 미운영 일요일만 제외 (오픈일 이후 일요일은 근무일)
-    if (allHolidays.has(d)) return 1; // 평일/토요일 휴일은 근무로 카운팅 (초과근무 로직 영향 방지)
-    const st = schedule?.[staffId]?.[d];
-    if (!st || st === "OFF" || st === "") return 0;
-    if (st === "VAC-AM" || st === "VAC-PM") return 0.5;
-    return 1;
-  }
+  // ── 소정근로일수 · 미달 알림 ──────────────────────────────────────────
+  // 계산 규칙은 lib/workload.js 한 곳에 있다 (앱과 서버 알림이 같은 기준을 쓰도록).
+  const cal = useMemo(
+    () => makeCalendar(year, month, { alt: altHolidays, cancelled: cancelledHolidays }),
+    [year, month, altHolidays, cancelledHolidays]
+  );
+  const baseline = useMemo(() => computeBaseline(cal), [cal]);
+  const capacityAlerts = useMemo(() => capacityNotes(cal), [cal]);
 
-  const overtimeMap = useMemo(() => {
+  // 이번 달을 보고 있으면 보충 가능일은 오늘 이후만 센다
+  const fromDay = useMemo(() => {
+    const now = new Date();
+    return (now.getFullYear() === year && now.getMonth() + 1 === month) ? now.getDate() : 1;
+  }, [year, month]);
+
+  const workloadMap = useMemo(() => {
     if (!schedule) return {};
-    const firstDow = new Date(year, month - 1, 1).getDay();
     const res = {};
     staffList.forEach(s => {
-      let ot = 0;
-      for (let d = 1; d <= days; ) {
-        const dow = new Date(year, month - 1, d).getDay();
-        const wk = [];
-        for (let i = 0; i < 7 - dow && d + i <= days; i++) wk.push(d + i);
-        let worked = wk.reduce((sum, day) => sum + workValue(s.id, day), 0);
-        // 첫째 주: 전월의 월요일~(월1일 전날)도 함께 카운팅
-        if (d === 1 && firstDow >= 2 && prevSchedule) {
-          for (let pd = prevMonthDays - (firstDow - 2); pd <= prevMonthDays; pd++) {
-            const pdDow = new Date(prevYear, prevMonth - 1, pd).getDay();
-            if (isClosedSunday(prevYear, prevMonth, pd)) continue;
-            if (phaseAt(s, prevYear, prevMonth, pd) !== "active") continue; // 미합류/온보딩 제외
-            if (prevPubHols.has(pd)) { worked++; continue; }
-            const st = prevSchedule?.[s.id]?.[pd];
-            if (!st || st === "OFF" || st === "") continue;
-            worked += (st === "VAC-AM" || st === "VAC-PM") ? 0.5 : 1;
-          }
-        }
-        if (worked > 5) ot += worked - 5;
-        d += wk.length;
-      }
-      res[s.id] = ot;
+      // 비활성(퇴사·휴직)은 이후 전 일자가 OFF로 채워져 있어 부족이 과하게 잡힌다 — 배지 제외.
+      if (!s.active) { res[s.id] = null; return; }
+      res[s.id] = evaluatePerson(cal, {
+        statusOf:   d => schedule?.[s.id]?.[d],
+        isActiveOn: d => phaseOf(s, d) === "active",
+        fromDay,
+      });
     });
     return res;
-  }, [schedule, prevSchedule, days, year, month, staffList, allHolidays, prevMonthDays, prevMonth, prevYear, prevPubHols]);
+  }, [schedule, staffList, cal, fromDay]);
+
+  // 부족한 사람만 추려 알림으로 — 아직 안 짜인 달은 대상에서 뺀다.
+  const shortfalls = useMemo(() => activeStaff
+    .map(s => ({ s, w: workloadMap[s.id] }))
+    .filter(({ w }) => w && w.diff < 0 && w.actual > 0)
+    .map(({ s, w }) => ({ id: s.id, name: s.name, short: -w.diff, openLeft: w.openLeft, needVac: w.needVac }))
+    .sort((a, b) => b.needVac - a.needVac || b.short - a.short),
+    [activeStaff, workloadMap]);
+
 
   // 상담방 배정 — 온라인 전담(onlineOnly) 제외한 대면 상담사에게 상담방(ROOMS) 배정.
   // 1) 홈룸: 대면 담당 인원이 방 수(7) 이내인 동안은 CONSULT_ORDER 순으로 개인별 고정방 배정(이동 0).
@@ -629,14 +600,17 @@ export default function App() {
 
   async function applyBulk({ staffIds, days: dList, status, fixedOffDays: offDays = [] }) {
     const ns = { ...schedule };
+    // 미운영 일요일이 범위에 섞여 들어와도 근무로 찍히지 않게 OFF로 돌린다.
+    const isSunOff = d => isClosedSunday(year, month, d);
     staffIds.forEach(sid => {
       ns[sid] = { ...ns[sid] };
-      dList.forEach(d => { ns[sid][d] = status; });
+      dList.forEach(d => { ns[sid][d] = isSunOff(d) ? "OFF" : status; });
       offDays.forEach(d => { ns[sid][d] = "OFF"; });
     });
     await saveSchedule(ns);
     const names = staffIds.map(id => staffList.find(s => s.id == id)?.name).join(", ");
-    await addLog(`일괄입력: ${names} / ${dList.length}일 ${STATUS_CONFIG[status]?.label || "비우기"}${offDays.length > 0 ? ` + OFF ${offDays.length}일` : ""}`);
+    const applied = dList.filter(d => !isSunOff(d)).length;
+    await addLog(`일괄입력: ${names} / ${applied}일 ${STATUS_CONFIG[status]?.label || "비우기"}${offDays.length > 0 ? ` + OFF ${offDays.length}일` : ""}`);
   }
 
   // 비활성 처리되는 사람의 "오늘 이후" 스케줄을 전부 OFF로 반영 (그 이전 근무 이력은 그대로 보존).
@@ -1057,6 +1031,58 @@ export default function App() {
         </div>
       )}
 
+      {/* 근무일수 미달 알림 — 월말에 손으로 찾지 않도록 미리 띄운다 */}
+      {(capacityAlerts.length > 0 || shortfalls.length > 0) && (
+        <div style={{ background: C.orangeLight, border: `1px solid ${C.orangeMid}`, borderRadius: 10, padding: "9px 14px", marginBottom: 10, fontSize: 12, color: C.g7 }}>
+          <strong style={{ color: C.orangeDark }}>근무일수 주의</strong>
+          {capacityAlerts.length > 0 && (
+            <div style={{ marginTop: 5, display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {capacityAlerts.map(n => (
+                <span key={n.key} style={{ background: C.white, border: `1px solid ${C.orangeMid}`, color: C.orangeDark, borderRadius: 5, padding: "2px 7px", fontWeight: 600 }}>{n.msg}</span>
+              ))}
+            </div>
+          )}
+          {shortfalls.length > 0 && (
+            <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
+              {shortfalls.map(f => (
+                <span key={f.id}
+                  title={f.needVac > 0
+                    ? `${f.name} — 기준보다 ${f.short}일 부족. 남은 운영일 중 비어 있는 날이 ${f.openLeft}일뿐이라 ${f.needVac}일은 휴가로 처리해야 총량이 맞습니다.`
+                    : `${f.name} — 기준보다 ${f.short}일 부족. 남은 운영일 중 ${f.openLeft}일이 비어 있어 근무로 돌리면 채울 수 있습니다.`}
+                  style={{
+                    background: f.needVac > 0 ? C.plum : C.white,
+                    color:      f.needVac > 0 ? C.white : C.g6,
+                    border: `1px solid ${f.needVac > 0 ? C.plum : C.line}`,
+                    borderRadius: 5, padding: "2px 8px", fontWeight: 700,
+                  }}>
+                  {f.name} −{f.short}일
+                  {f.needVac > 0 ? ` · 휴가 처리 필요 ${f.needVac}일` : ` · 보충 가능 (빈 운영일 ${f.openLeft}일)`}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 기준 근무일수 — 초과/부족 배지의 비교 기준. 지정휴일을 넣으면 법정 기준보다 내려간다. */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10, fontSize: 11, color: C.g6, fontWeight: 600 }}>
+        <span style={{ background: C.ivory, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 9px" }}>
+          {month}월 기준 근무일수 <strong style={{ color: C.black }}>{baseline.required}일</strong>
+        </span>
+        <span style={{ color: C.grey }}>
+          평일 {baseline.weekdays}일
+          {baseline.pubOnWeekday > 0 && ` − 공휴일 ${baseline.pubOnWeekday}일`}
+          {baseline.altOnWeekday > 0 && ` − 지정휴일 ${baseline.altOnWeekday}일`}
+          {" "}· 토·일은 기준에서 제외 (주5일 사무직 기준)
+        </span>
+        {baseline.altOnWeekday > 0 && (
+          <span style={{ background: C.plumLight, color: C.plum, border: `1px solid ${C.plumMid}33`, borderRadius: 6, padding: "3px 9px" }}
+            title={`법정 공휴일만 반영하면 ${baseline.statutory}일. 지정휴일(대체공휴일 포함) ${baseline.altOnWeekday}일을 더 빼서 ${baseline.required}일이 됐습니다.`}>
+            일반 사무직 기준({baseline.statutory}일)보다 {baseline.altOnWeekday}일 적음
+          </span>
+        )}
+      </div>
+
       {/* 범례 */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10, alignItems: "center" }}>
         {Object.entries(STATUS_CONFIG).filter(([k]) => k).map(([k, v]) => (
@@ -1080,7 +1106,7 @@ export default function App() {
                 {dayHeaders.map(({ d, dow }) => {
                   const isPub       = pubHolsThisMonth.has(d) && !cancelledHolidays.has(d);
                   const isAlt       = altHolidays.has(d);
-                  const isClosed    = isPub || isAlt || isClosedSunday(year, month, d); // 일요일(오픈 전)·공휴일·지정휴일 = 미운영
+                  const isClosed    = isPub || isAlt || isClosedSunday(year, month, d); // 미운영 일요일·공휴일·지정휴일 = 미운영
                   const dot         = isPub ? C.orange : isAlt ? C.plumMid : warnDays.has(d) ? C.orangeDark : null;
                   const isToday     = isCurrentRealMonth && realToday.getDate() === d;
                   return (
@@ -1131,9 +1157,10 @@ export default function App() {
                             +{s.altLangs.map(l => LANG_LABEL[l] || l).join("·")}
                           </div>
                         )}
-                        {overtimeMap[s.id] > 0 && (
-                          <div style={{ fontSize: 9, fontWeight: 800, color: C.white, background: C.orange, borderRadius: 4, padding: "1px 4px", marginTop: 2, lineHeight: 1.4 }}>
-                            초과 +{overtimeMap[s.id]}일
+                        {workloadMap[s.id] && workloadMap[s.id].diff !== 0 && (
+                          <div title={`실제 근무 ${workloadMap[s.id].actual}일 / 기준 ${workloadMap[s.id].required}일`}
+                            style={{ fontSize: 9, fontWeight: 800, color: C.white, background: workloadMap[s.id].diff > 0 ? C.orange : C.plumMid, borderRadius: 4, padding: "1px 4px", marginTop: 2, lineHeight: 1.4 }}>
+                            {workloadMap[s.id].diff > 0 ? `초과 +${workloadMap[s.id].diff}일` : `부족 −${-workloadMap[s.id].diff}일`}
                           </div>
                         )}
                       </td>
@@ -1154,7 +1181,9 @@ export default function App() {
                         const room = roomMap[s.id]?.[d];
                         const isOverride = roomOverrides[s.id]?.[d] != null;
                         const isDup = room && roomDupByDay[d]?.has(room);
-                        const editable = canEditStaff(s.id);
+                        // 미운영 일요일은 전체 공통 OFF라 개별 수정 불가
+                        const closedSun = isClosedSunday(year, month, d);
+                        const editable = canEditStaff(s.id) && !closedSun;
                         return (
                           <td key={d}
                             onClick={() => {
@@ -1184,7 +1213,7 @@ export default function App() {
                             onTouchEnd={() => clearTimeout(cellLongPressTimer.current)}
                             onTouchMove={() => clearTimeout(cellLongPressTimer.current)}
                             style={{ background: isEdit ? C.orangeLight : isClosed ? C.g1 : C.white, color: isDup ? C.orangeDark : cfg.color, fontWeight: 700, fontSize: 10, textAlign: "center", cursor: editable ? "pointer" : "default", padding: "4px 1px", border: isEdit ? `2px solid ${C.orange}` : isDup ? `1px solid ${C.orangeDark}` : `1px solid ${C.g1}`, userSelect: "none", minWidth: 30 }}
-                            title={`${s.name} ${month}/${d} ${cfg.label}${st === "OFF-Con" && roomReady && room ? ` · ${room}번방${isOverride ? " (강제지정)" : ""}${isDup ? " · 중복사용" : ""}` : ""}${editable ? " | 클릭=OFF토글 / 더블클릭 또는 길게누르기=상태선택" : " | 읽기 전용 (본인 근무만 수정 가능)"}`}>
+                            title={`${s.name} ${month}/${d} ${cfg.label}${st === "OFF-Con" && roomReady && room ? ` · ${room}번방${isOverride ? " (강제지정)" : ""}${isDup ? " · 중복사용" : ""}` : ""}${editable ? " | 클릭=OFF토글 / 더블클릭 또는 길게누르기=상태선택" : closedSun ? " | 일요일 미운영 (전체 공통 OFF)" : " | 읽기 전용 (본인 근무만 수정 가능)"}`}>
                             {st === "OFF-Con" ? ((roomReady && room) ? `대면(no.${room}${isOverride ? "🔒" : ""})` : "대면") : cfg.short}
                           </td>
                         );
@@ -1398,6 +1427,7 @@ function BulkModal({ staff, days, month, year, preStaff, onApply, onClose, font 
     for (let d = from; d <= to; d++) {
       const w = new Date(year, month - 1, d).getDay();
       if (fixedOffDows.includes(w)) continue;
+      if (isClosedSunday(year, month, d)) continue; // 미운영 일요일은 근무일에서 제외 (아래 OFF로 처리)
       a.push(d);
     }
     return a;
@@ -1407,9 +1437,16 @@ function BulkModal({ staff, days, month, year, preStaff, onApply, onClose, font 
     const a = [];
     for (let d = from; d <= to; d++) {
       const w = new Date(year, month - 1, d).getDay();
-      if (fixedOffDows.includes(w)) a.push(d);
+      if (fixedOffDows.includes(w) || isClosedSunday(year, month, d)) a.push(d);
     }
     return a;
+  })();
+
+  // 선택 범위에 미운영 일요일이 몇 개 들어있는지 — 안내 문구용
+  const closedSunInRange = (() => {
+    let n = 0;
+    for (let d = from; d <= to; d++) if (isClosedSunday(year, month, d)) n++;
+    return n;
   })();
 
   const stepLabels = ["1. 직원 선택", "2. 날짜 범위", "3. 상태 선택"];
@@ -1482,13 +1519,18 @@ function BulkModal({ staff, days, month, year, preStaff, onApply, onClose, font 
             </div>
             {fixedOffDows.length > 0 && (
               <div style={{ fontSize: 11, color: C.g6, marginTop: 8, fontWeight: 600 }}>
-                {fixedOffDows.map(d => ["일", "월", "화", "수", "목", "금", "토"][d]).join(", ")}요일 ({fixedOffDays.length}일) 자동 OFF
+                {fixedOffDows.map(d => ["일", "월", "화", "수", "목", "금", "토"][d]).join(", ")}요일 선택됨 → 자동 OFF
+              </div>
+            )}
+            {closedSunInRange > 0 && (
+              <div style={{ fontSize: 11, color: C.g6, marginTop: 6, fontWeight: 600 }}>
+                일요일 {closedSunInRange}일은 미운영이라 선택과 무관하게 자동 OFF
               </div>
             )}
           </div>
           <div style={{ background: C.white, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 12px", fontSize: 12, color: C.g6, marginBottom: 14, fontWeight: 600 }}>
             {month}/{from} ~ {month}/{to} → 근무 <strong style={{ color: C.black }}>{workDays.length}일</strong>
-            {fixedOffDays.length > 0 && <span> + 고정 휴무 <strong style={{ color: C.black }}>{fixedOffDays.length}일</strong> OFF</span>}
+            {fixedOffDays.length > 0 && <span> + 휴무 <strong style={{ color: C.black }}>{fixedOffDays.length}일</strong> OFF</span>}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setStep(1)} style={{ flex: 1, background: C.white, border: `1px solid ${C.g2}`, color: C.black, borderRadius: 8, padding: "10px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: font }}>이전</button>
@@ -1517,7 +1559,7 @@ function BulkModal({ staff, days, month, year, preStaff, onApply, onClose, font 
             직원 · <strong style={{ color: C.black }}>{staff.filter(s => selStaff.includes(s.id)).map(s => s.name).join(", ")}</strong><br />
             기간 · <strong style={{ color: C.black }}>{month}/{from} ~ {month}/{to}</strong><br />
             근무 {workDays.length}일 → <strong style={{ color: C.black }}>{STATUS_CONFIG[status]?.label || "비우기"}</strong>
-            {fixedOffDays.length > 0 && <><br />고정 휴무 <strong style={{ color: C.black }}>{fixedOffDays.length}일 OFF</strong></>}
+            {fixedOffDays.length > 0 && <><br />휴무 <strong style={{ color: C.black }}>{fixedOffDays.length}일 OFF</strong></>}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setStep(2)} style={{ flex: 1, background: C.white, border: `1px solid ${C.g2}`, color: C.black, borderRadius: 8, padding: "10px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: font }}>이전</button>
@@ -1614,7 +1656,7 @@ function CalendarView({ year, month, days, schedule, warnings, staff, altHoliday
           const working = staff.filter(s => schedule[s.id]?.[d] && !["OFF", ""].includes(schedule[s.id][d]));
           const isToday = isCurrentMonth && today.getDate() === d;
           const inTodayRow = todayRow === Math.floor(i / 7);
-          const isClosed = isAlt || isClosedSunday(year, month, d); // 미운영일(일요일 오픈 전·휴일)
+          const isClosed = isAlt || isClosedSunday(year, month, d); // 미운영일(일요일·휴일)
           return (
             <div key={d} onClick={() => onDayClick(d)}
               style={{ border: `${isToday ? 2 : 1}px solid ${isToday ? C.orange : C.line}`, borderRadius: 8, padding: "5px 6px", minHeight: 80, background: isClosed ? C.g1 : inTodayRow ? C.orangeLight : C.white, cursor: "pointer" }}>

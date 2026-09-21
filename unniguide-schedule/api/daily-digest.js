@@ -3,6 +3,10 @@
 // 순수 서버 코드이며, 비밀값은 전부 Vercel 환경변수로 관리한다 (코드에 평문 없음).
 // 방 배정 로직은 재설계 예정이라 방 번호는 표시하지 않는다.
 
+// 일요일 미운영 판정은 앱과 같은 규칙을 써야 하므로 lib/workload.js에서 가져온다.
+// 일요일은 전체 공통 휴무라 출근 명단이 전원 OFF가 된다 → 알림 자체를 보내지 않는다.
+import { isClosedSunday } from "../lib/workload.js";
+
 const LANG_LABEL = { "영미": "영어", "중국/대만": "중국/대만", "태국": "태국", "일본": "일본" };
 
 // 이름 -> Slack 사용자 ID. 매핑이 있으면 @태그로, 없으면 이름 그대로 표시.
@@ -60,6 +64,8 @@ async function buildDigest() {
   const day = now.getDate();
   const weekdayKo = ["일", "월", "화", "수", "목", "금", "토"][now.getDay()];
   const mkey = `${year}-${String(month).padStart(2, "0")}`;
+
+  if (isClosedSunday(year, month, day)) return null; // 미운영 일요일 → 알림 스킵
 
   const token = await signIn();
   const [staffRaw, schedule] = await Promise.all([
@@ -132,6 +138,11 @@ export default async function handler(req, res) {
     text = await buildDigest();
   } catch (e) {
     text = `출근 명단 생성 실패: ${e.message}`;
+  }
+
+  if (text === null) {
+    res.status(200).json({ ok: true, skipped: "closed_sunday" });
+    return;
   }
 
   try {
