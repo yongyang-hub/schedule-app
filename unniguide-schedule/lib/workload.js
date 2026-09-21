@@ -48,8 +48,22 @@ export function closedSundaysOf(y, m) {
   return out;
 }
 
-// 유급으로 인정되는 날 = 실제 출근 + 휴가/반차. OFF·빈칸·대기·온보딩은 제외.
+// 근무일수로 인정되는 날 = 실제 출근 + 휴가 + 반차. OFF·빈칸·대기·온보딩은 제외.
+// 휴가와 반차를 1일로 세는 이유: 기준이 "일반 사무직과 같은 월 총 근무일수"이고,
+// 연차는 소정근로일에 포함되는 유급휴가라 쓴다고 미달이 아니기 때문이다.
+// (못 채우는 사람에게 휴가를 쓰게 하는 실제 운영과도 맞물린다.)
+// 다만 총량만 보면 실제 출근이 며칠인지 가려지므로, 아래 evaluatePerson이 내역을 따로 돌려준다.
 export const countsAsWorked = st => !!st && !["OFF", "", "ALT", "ONBD"].includes(st);
+export const isVacation = st => st === "VAC";
+export const isHalfDay = st => st === "VAC-AM" || st === "VAC-PM";
+
+// 근무일수 내역을 사람이 읽는 한 줄로. 앱 배지와 Slack 알림이 같은 문구를 쓴다.
+export function breakdownText(r) {
+  const parts = [`출근 ${r.attended}일`];
+  if (r.halfDays) parts.push(`반차 ${r.halfDays}일`);
+  if (r.vacDays) parts.push(`휴가 ${r.vacDays}일`);
+  return parts.join(" · ");
+}
 
 // 한 달치 달력 컨텍스트. alt=지정휴일(대체공휴일 포함), cancelled=취소된 공휴일.
 export function makeCalendar(y, m, { alt = new Set(), cancelled = new Set() } = {}) {
@@ -122,14 +136,20 @@ export function capacityNotes(cal) {
 //   isActiveOn(d) → 그 날 정상 근무 구간인지 (미합류·온보딩 제외)
 //   fromDay       → 보충 가능일을 셀 시작일 (이번 달이면 오늘, 아니면 1)
 export function evaluatePerson(cal, { statusOf, isActiveOn = () => true, fromDay = 1 }) {
-  let required = 0, actual = 0;
+  let required = 0, attended = 0, halfDays = 0, vacDays = 0;
   for (let d = 1; d <= cal.days; d++) {
     if (!isActiveOn(d)) continue;
     // 기준: 평일 중 공휴일·지정휴일이 아닌 날
     if (cal.isWeekday(d) && !cal.isPubHoliday(d) && !cal.alt.has(d)) required++;
-    // 실적: 미운영 일요일은 셀 수 없고, 나머지는 스케줄 그대로
-    if (!isClosedSunday(cal.y, cal.m, d) && countsAsWorked(statusOf(d))) actual++;
+    // 실적: 미운영 일요일은 셀 수 없고, 나머지는 스케줄 그대로.
+    // 셋 다 1일로 합산하되 어디서 온 1일인지는 따로 남긴다.
+    if (isClosedSunday(cal.y, cal.m, d)) continue;
+    const st = statusOf(d);
+    if (isVacation(st)) vacDays++;
+    else if (isHalfDay(st)) halfDays++;
+    else if (countsAsWorked(st)) attended++;
   }
+  const actual = attended + halfDays + vacDays;
   const diff = actual - required;
 
   // 앞으로 근무로 돌릴 수 있는 날 — 주 5일 상한을 넘겨 채우라고 할 수는 없으므로
@@ -145,5 +165,5 @@ export function evaluatePerson(cal, { statusOf, isActiveOn = () => true, fromDay
   }
 
   const short = Math.max(0, -diff);
-  return { required, actual, diff, openLeft, needVac: Math.max(0, short - openLeft) };
+  return { required, actual, attended, halfDays, vacDays, diff, openLeft, needVac: Math.max(0, short - openLeft) };
 }

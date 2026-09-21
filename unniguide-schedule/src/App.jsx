@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { dbGet, dbSet, dbListen, authListen, authGoogleLogin, authLogout } from "./firebase";
 import {
   KR_HOLIDAYS, getDays, isClosedSunday, closedSundaysOf,
-  makeCalendar, computeBaseline, capacityNotes, evaluatePerson,
+  makeCalendar, computeBaseline, capacityNotes, evaluatePerson, breakdownText,
 } from '../lib/workload.js';
 
 const ALLOWED_EMAIL_DOMAIN = "healingpaper.com";
@@ -463,7 +463,7 @@ export default function App() {
   const shortfalls = useMemo(() => activeStaff
     .map(s => ({ s, w: workloadMap[s.id] }))
     .filter(({ w }) => w && w.diff < 0 && w.actual > 0)
-    .map(({ s, w }) => ({ id: s.id, name: s.name, short: -w.diff, openLeft: w.openLeft, needVac: w.needVac }))
+    .map(({ s, w }) => ({ id: s.id, name: s.name, short: -w.diff, openLeft: w.openLeft, needVac: w.needVac, detail: breakdownText(w), actual: w.actual, required: w.required }))
     .sort((a, b) => b.needVac - a.needVac || b.short - a.short),
     [activeStaff, workloadMap]);
 
@@ -1046,17 +1046,17 @@ export default function App() {
             <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
               {shortfalls.map(f => (
                 <span key={f.id}
-                  title={f.needVac > 0
-                    ? `${f.name} — 기준보다 ${f.short}일 부족. 남은 운영일 중 비어 있는 날이 ${f.openLeft}일뿐이라 ${f.needVac}일은 휴가로 처리해야 총량이 맞습니다.`
-                    : `${f.name} — 기준보다 ${f.short}일 부족. 남은 운영일 중 ${f.openLeft}일이 비어 있어 근무로 돌리면 채울 수 있습니다.`}
+                  title={`${f.name} — ${f.detail} = ${f.actual}일 / 기준 ${f.required}일. ` + (f.needVac > 0
+                    ? `남은 운영일 중 비어 있는 날이 ${f.openLeft}일뿐이라 ${f.needVac}일은 휴가로 처리해야 총량이 맞습니다.`
+                    : `남은 운영일 중 ${f.openLeft}일이 비어 있어 근무로 돌리면 채울 수 있습니다.`)}
                   style={{
                     background: f.needVac > 0 ? C.plum : C.white,
                     color:      f.needVac > 0 ? C.white : C.g6,
                     border: `1px solid ${f.needVac > 0 ? C.plum : C.line}`,
                     borderRadius: 5, padding: "2px 8px", fontWeight: 700,
                   }}>
-                  {f.name} −{f.short}일
-                  {f.needVac > 0 ? ` · 휴가 처리 필요 ${f.needVac}일` : ` · 보충 가능 (빈 운영일 ${f.openLeft}일)`}
+                  {f.name} {f.actual}/{f.required}일 ({f.detail})
+                  {f.needVac > 0 ? ` → 휴가 처리 필요 ${f.needVac}일` : ` → 보충 가능 (빈 운영일 ${f.openLeft}일)`}
                 </span>
               ))}
             </div>
@@ -1158,7 +1158,7 @@ export default function App() {
                           </div>
                         )}
                         {workloadMap[s.id] && workloadMap[s.id].diff !== 0 && (
-                          <div title={`실제 근무 ${workloadMap[s.id].actual}일 / 기준 ${workloadMap[s.id].required}일`}
+                          <div title={`${breakdownText(workloadMap[s.id])} = ${workloadMap[s.id].actual}일 / 기준 ${workloadMap[s.id].required}일`}
                             style={{ fontSize: 9, fontWeight: 800, color: C.white, background: workloadMap[s.id].diff > 0 ? C.orange : C.plumMid, borderRadius: 4, padding: "1px 4px", marginTop: 2, lineHeight: 1.4 }}>
                             {workloadMap[s.id].diff > 0 ? `초과 +${workloadMap[s.id].diff}일` : `부족 −${-workloadMap[s.id].diff}일`}
                           </div>

@@ -8,7 +8,7 @@
 //
 // 계산 규칙은 앱 화면과 똑같이 lib/workload.js 하나만 쓴다.
 import {
-  makeCalendar, computeBaseline, capacityNotes, evaluatePerson, getDays,
+  makeCalendar, computeBaseline, capacityNotes, evaluatePerson, breakdownText, getDays,
 } from "../lib/workload.js";
 
 // 이름 -> Slack 사용자 ID. 매핑이 있으면 @태그로, 없으면 이름 그대로 표시.
@@ -122,12 +122,12 @@ async function buildReport() {
     const fixable = shortfalls.filter(f => f.needVac === 0);
     if (urgent.length) {
       lines.push("*휴가 처리 필요* — 남은 운영일로는 채울 수 없습니다");
-      urgent.forEach(f => lines.push(`• ${mention(f.name)} ${f.actual}/${f.required}일 (−${-f.diff}) → 휴가 ${f.needVac}일 필요`));
+      urgent.forEach(f => lines.push(`• ${mention(f.name)} ${f.actual}/${f.required}일 — ${breakdownText(f)} → 휴가 ${f.needVac}일 더 필요`));
     }
     if (fixable.length) {
       if (urgent.length) lines.push("");
       lines.push("*보충 가능* — 남은 빈 운영일을 근무로 돌리면 채워집니다");
-      fixable.forEach(f => lines.push(`• ${mention(f.name)} ${f.actual}/${f.required}일 (−${-f.diff}) → 빈 운영일 ${f.openLeft}일`));
+      fixable.forEach(f => lines.push(`• ${mention(f.name)} ${f.actual}/${f.required}일 — ${breakdownText(f)} → 남은 빈 운영일 ${f.openLeft}일`));
     }
   }
 
