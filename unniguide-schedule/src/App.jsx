@@ -4,6 +4,7 @@ import {
   KR_HOLIDAYS, getDays, isClosedSunday, closedSundaysOf,
   makeCalendar, computeBaseline, capacityNotes, evaluatePerson, breakdownText,
 } from '../lib/workload.js';
+import { SUPPLY_LANGS, DEFAULT_SLOTS, normalizeSupplySettings, computeSupply, shareFromPercent } from '../lib/supply.js';
 
 const ALLOWED_EMAIL_DOMAIN = "healingpaper.com";
 const ADMIN_EMAILS = ["yong.yang@healingpaper.com", "moka.lee@healingpaper.com"];
@@ -147,6 +148,8 @@ const fbLogs      = (y, m) => `logs/${y}-${String(m).padStart(2, "0")}`;
 const fbRoomOverride = (y, m) => `roomOverrides/${y}-${String(m).padStart(2, "0")}`;
 const fbUserProfile  = (uid)   => `userProfiles/${uid}`;
 const fbJoinRequests = ()      => `joinRequests`;
+const fbSupplySettings = ()    => `supplySettings`; // 언어권별 상담사 1인당 하루 슬롯 수 (관리자 설정)
+const fbShareOverrides = ()    => `supplyShareOverrides`; // { [staffId]: { [언어권]: % } } — 상담 언어 비율 관리자 고정값
 
 // 신규 로그인 사용자가 1차로 선택할 수 있는 역할 — GROUPS/LANG_GROUPS와 동일한 분류
 const ROLE_OPTIONS = [
@@ -186,6 +189,8 @@ export default function App() {
   const [joinRequests,  setJoinRequests]  = useState({}); // { [uid]: {email,koreanName,englishName,roleKey,roleLabel,type,lang,status,createdAt} }
   const [roleSubmitting, setRoleSubmitting] = useState(false);
   const [showApprovals, setShowApprovals] = useState(false);
+  const [supplySettingsRaw, setSupplySettingsRaw] = useState(null);
+  const [shareOverrides, setShareOverrides] = useState({});
   const userName = userProfile?.koreanName || "";
   const isAdmin = !!(authUser && ADMIN_EMAILS.includes(authUser.email));
   const myStaff = (authUser && staffList.find(s => s.email && s.email === authUser.email)) || null;
@@ -345,8 +350,10 @@ export default function App() {
     });
     const u6 = dbListen(fbRoomOverride(year, month), val => setRoomOverrides(val || {}));
     const u7 = dbListen(fbJoinRequests(), val => setJoinRequests(val || {}));
+    const u8 = dbListen(fbSupplySettings(), val => setSupplySettingsRaw(val));
+    const u9 = dbListen(fbShareOverrides(), val => setShareOverrides(val || {}));
 
-    unsubRefs.current = [u1, u2, u3, u3b, u4, u6, u7];
+    unsubRefs.current = [u1, u2, u3, u3b, u4, u6, u7, u8, u9];
     return () => unsubRefs.current.forEach(fn => fn());
   }, [year, month, authUser]);
 
@@ -467,6 +474,23 @@ export default function App() {
     .sort((a, b) => b.needVac - a.needVac || b.short - a.short),
     [activeStaff, workloadMap]);
 
+
+  // ── 대면 상담 공급량 (관리자 화면) ── 계산 규칙은 lib/supply.js, 지난 달 추이는 SupplyView가 따로 불러온다
+  const supplySettings = useMemo(() => normalizeSupplySettings(supplySettingsRaw), [supplySettingsRaw]);
+
+  async function saveShareOverride(sid, pct) {
+    const s = staffList.find(x => x.id == sid);
+    await dbSet(`${fbShareOverrides()}/${sid}`, pct || null);
+    await addLog(pct
+      ? `${s?.name} 상담 언어 비율 고정: ` + SUPPLY_LANGS.filter(lg => +pct[lg]).map(lg => `${LANG_LABEL[lg]} ${pct[lg]}%`).join(", ")
+      : `${s?.name} 상담 언어 비율 고정 해제 (근무표 언어 기준)`);
+  }
+
+  async function saveSupplySettings(next) {
+    const norm = normalizeSupplySettings(next);
+    await dbSet(fbSupplySettings(), norm);
+    await addLog(`1인당 하루 슬롯 설정 변경: ` + SUPPLY_LANGS.map(lg => `${LANG_LABEL[lg]} 평일 ${norm[lg].weekday}·토 ${norm[lg].saturday}`).join(", "));
+  }
 
   // 상담방 배정 — 온라인 전담(onlineOnly) 제외한 대면 상담사에게 상담방(ROOMS) 배정.
   // 1) 홈룸: 대면 담당 인원이 방 수(7) 이내인 동안은 CONSULT_ORDER 순으로 개인별 고정방 배정(이동 0).
@@ -900,10 +924,15 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <Btn onClick={() => setBulkModal({})} style={{ background: C.orange, border: "none", color: C.white }}>일괄 입력</Btn>
-          <Btn onClick={() => setView(v => v === "table" ? "calendar" : "table")}>{view === "table" ? "캘린더 보기" : "테이블 보기"}</Btn>
+          <Btn onClick={() => setView(v => v === "table" ? "calendar" : "table")}>{view === "calendar" ? "테이블 보기" : "캘린더 보기"}</Btn>
           {isAdmin && (
             <Btn onClick={() => setShowInactive(v => !v)} style={showInactive ? { background: C.black, color: C.white, border: "none" } : {}}>
               {showInactive ? "전체 보기 중" : "합류 대기 포함"}
+            </Btn>
+          )}
+          {isAdmin && (
+            <Btn onClick={() => setView(v => v === "supply" ? "table" : "supply")} style={view === "supply" ? { background: C.black, color: C.white, border: "none" } : {}}>
+              공급 슬롯
             </Btn>
           )}
           {isAdmin && <Btn onClick={() => setStaffModal({ mode: "add" })}>직원 추가</Btn>}
@@ -1225,6 +1254,12 @@ export default function App() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {view === "supply" && isAdmin && (
+        <SupplyView year={year} month={month} cal={cal} staffList={staffList} schedule={schedule} phaseAt={phaseAt}
+          settings={supplySettings} onSaveSettings={saveSupplySettings}
+          overrides={shareOverrides} onSaveOverride={saveShareOverride} />
       )}
 
       {view === "calendar" && <CalendarView year={year} month={month} days={days} schedule={schedule} warnings={warnings} staff={displayStaff} altHolidays={allHolidays} onDayClick={setDayPopup} />}
@@ -1634,6 +1669,273 @@ function StaffFormModal({ mode, initial, onSave, onClose, font }) {
 }
 
 // ── CalendarView ──────────────────────────────────────────────
+// ── 공급 슬롯 (관리자 전용) ───────────────────────────────────
+// 공급 = 근무표의 대면 근무 인원 × 1인당 하루 슬롯 (lib/supply.js)
+//   언어권별 공급은 근무표 주 언어 기준이고, 실제로 다른 언어를 주로 받는 상담사는 관리자가 비율을 고정한다.
+// 지난 달 추이는 근무표 원본(schedule/·altHolidays/·cancelledHolidays/)을 한 번씩 읽어 같은 규칙으로 계산한다.
+const SUPPLY_HISTORY_MONTHS = 6; // 월·주 추이에 보여줄 기간 (조회 중인 달 포함)
+
+function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, onSaveSettings, overrides, onSaveOverride }) {
+  const [draft, setDraft]     = useState(settings);
+  const [dirty, setDirty]     = useState(false);
+  const [saving, setSaving]   = useState(false);
+  const [history, setHistory] = useState(null); // { "YYYY-MM": { y, m, schedule, alt, cancelled } } — 조회 중인 달 제외
+  const [shareEdit, setShareEdit] = useState(null); // { sid, pct }
+  useEffect(() => { if (!dirty) setDraft(settings); }, [settings, dirty]);
+
+  const ymKey = (y, m) => `${y}-${String(m).padStart(2, "0")}`;
+  const pastMonths = useMemo(() => {
+    const out = [];
+    for (let i = SUPPLY_HISTORY_MONTHS - 1; i >= 1; i--) {
+      const t = new Date(year, month - 1 - i, 1);
+      out.push({ y: t.getFullYear(), m: t.getMonth() + 1 });
+    }
+    return out;
+  }, [year, month]);
+
+  useEffect(() => {
+    let alive = true;
+    setHistory(null);
+    Promise.all(pastMonths.map(({ y, m }) => Promise.all([
+      dbGet(fbSchedule(y, m)), dbGet(fbAlt(y, m)), dbGet(fbCancelled(y, m)),
+    ]).then(([sch, alt, can]) => [ymKey(y, m), {
+      y, m, schedule: sch, alt: new Set(alt ? Object.values(alt) : []), cancelled: new Set(can ? Object.values(can) : []),
+    }]))).then(entries => { if (alive) setHistory(Object.fromEntries(entries)); })
+      .catch(() => { if (alive) setHistory({}); });
+    return () => { alive = false; };
+  }, [pastMonths]);
+
+  const shareInfo = s => {
+    const fixed = shareFromPercent(overrides?.[s.id]);
+    return fixed ? { share: fixed, src: "고정" } : { share: null, src: "기본" };
+  };
+  const supplyOf = (c, sch, y, m) => computeSupply(c, {
+    staff: staffList,
+    statusOf:   (s, d) => sch?.[s.id]?.[d],
+    isActiveOn: (s, d) => phaseAt(s, y, m, d) === "active",
+    settings,
+    shareOf: s => shareInfo(s).share,
+  });
+
+  // 조회 중인 달은 실시간 근무표, 지난 달은 불러온 원본으로 계산 → 월 순서대로
+  const monthly = useMemo(() => {
+    const out = [];
+    pastMonths.forEach(({ y, m }) => {
+      const h = history?.[ymKey(y, m)];
+      if (!h?.schedule) { out.push({ y, m, supply: null }); return; }
+      out.push({ y, m, supply: supplyOf(makeCalendar(y, m, { alt: h.alt, cancelled: h.cancelled }), h.schedule, y, m) });
+    });
+    out.push({ y: year, m: month, supply: supplyOf(cal, schedule, year, month), current: true });
+    return out;
+  }, [history, pastMonths, cal, schedule, staffList, settings, overrides]);
+  const cur = monthly[monthly.length - 1].supply;
+
+  // 주 단위(일~토, 일요일은 휴무라 사실상 월~토) — 월 경계를 넘어 이어 붙인다.
+  const weekly = useMemo(() => {
+    const days = [];
+    monthly.forEach(({ y, m, supply }) => {
+      if (!supply) return;
+      Object.entries(supply.byDay).forEach(([d, row]) => days.push({ date: new Date(y, m - 1, +d), row }));
+    });
+    const weeks = [];
+    days.forEach(({ date, row }) => {
+      const start = new Date(date); start.setDate(date.getDate() - date.getDay());
+      const key = start.getTime();
+      let wk = weeks[weeks.length - 1];
+      if (!wk || wk.key !== key) { wk = { key, start, end: date, n: 0, tot: Object.fromEntries(SUPPLY_LANGS.map(lg => [lg, { heads: 0, slots: 0 }])) }; weeks.push(wk); }
+      wk.end = date; wk.n++;
+      SUPPLY_LANGS.forEach(lg => { wk.tot[lg].heads += row[lg].heads; wk.tot[lg].slots += row[lg].slots; });
+    });
+    // 불러온 기간 앞뒤에서 잘린 주
+    if (days.length && days[0].date.getDay() !== 0) weeks[0].partial = true;
+    if (days.length && days[days.length - 1].date.getDay() !== 6) weeks[weeks.length - 1].partial = true;
+    return weeks.reverse();
+  }, [monthly]);
+
+  const total = o => SUPPLY_LANGS.reduce((n, lg) => n + o[lg].slots, 0);
+  const totalHeads = o => SUPPLY_LANGS.reduce((n, lg) => n + o[lg].heads, 0);
+  const num = v => (Number.isInteger(v) ? v : +v.toFixed(1)).toLocaleString();
+  const pct = f => Math.round(f * 100);
+  const md = dt => `${dt.getMonth() + 1}/${dt.getDate()}`;
+  const card = { background: C.white, borderRadius: 12, padding: 14, border: `1px solid ${C.line}`, marginBottom: 12 };
+  const title = { fontWeight: 800, fontSize: 13, color: C.black, marginBottom: 8 };
+  const sub = { fontWeight: 500, color: C.grey, fontSize: 11 };
+  const td = { padding: "5px 8px", borderBottom: `1px solid ${C.g1}`, fontSize: 12, textAlign: "right", whiteSpace: "nowrap" };
+  const tdL = { ...td, textAlign: "left", fontWeight: 700 };
+  const thS = { ...td, fontWeight: 800, color: C.g6, background: C.g1, borderBottom: `1px solid ${C.g2}` };
+  // 언어권별 "슬롯 (인원)" 셀 + 전체
+  const langCells = o => [
+    <td key="tot" style={{ ...td, fontWeight: 900, background: C.ivory }}>{num(total(o))}<span style={{ color: C.grey, fontWeight: 500, fontSize: 10 }}> ({num(totalHeads(o))})</span></td>,
+    ...SUPPLY_LANGS.map(lg => (
+      <td key={lg} style={td}><strong>{num(o[lg].slots)}</strong><span style={{ color: C.grey, fontSize: 10 }}> ({num(o[lg].heads)})</span></td>
+    )),
+  ];
+  const langHeads = [
+    <th key="tot" style={thS}>전체</th>,
+    ...SUPPLY_LANGS.map(lg => <th key={lg} style={thS}>{LANG_LABEL[lg]}</th>),
+  ];
+
+  async function save() {
+    setSaving(true);
+    try { await onSaveSettings(draft); setDirty(false); }
+    catch (e) { alert(`저장하지 못했어요: ${e.message}`); }
+    finally { setSaving(false); }
+  }
+  async function saveShare(sid, pctMap) {
+    try { await onSaveOverride(sid, pctMap); setShareEdit(null); }
+    catch (e) { alert(`저장하지 못했어요: ${e.message}`); }
+  }
+
+  const consultants = staffList
+    .filter(s => s.active && s.type === "consultant")
+    .sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
+
+  return (
+    <div>
+      {/* 1인당 하루 슬롯 설정 */}
+      <div style={card}>
+        <div style={title}>상담사 1인당 하루 슬롯 <span style={sub}>30분 슬롯 · 점심 휴식 1시간 고정 제외 · 기본값 평일 {DEFAULT_SLOTS.weekday} · 토 {DEFAULT_SLOTS.saturday}</span></div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+          {SUPPLY_LANGS.map(lg => (
+            <div key={lg} style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "6px 10px" }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.g6, marginBottom: 4 }}>{LANG_LABEL[lg]} 상담사</div>
+              {["weekday", "saturday"].map(k => (
+                <label key={k} style={{ fontSize: 11, color: C.g5, marginRight: 8 }}>
+                  {k === "weekday" ? "평일 " : "토 "}
+                  <input type="number" min={0} value={draft[lg][k]}
+                    onChange={e => { setDirty(true); setDraft(p => ({ ...p, [lg]: { ...p[lg], [k]: e.target.value } })); }}
+                    style={{ width: 46, border: `1px solid ${C.g2}`, borderRadius: 6, padding: "3px 5px", fontSize: 12, fontFamily: font }} />
+                </label>
+              ))}
+            </div>
+          ))}
+          <Btn onClick={save} style={dirty ? { background: C.orange, color: C.white, border: "none" } : { opacity: 0.5 }}>{saving ? "저장 중…" : "저장"}</Btn>
+          {dirty && <Btn onClick={() => { setDraft(settings); setDirty(false); }}>되돌리기</Btn>}
+        </div>
+        <div style={{ fontSize: 11, color: C.grey, marginTop: 8, lineHeight: 1.6 }}>
+          공급 = 그날 대면 상담 인원 × 1인당 슬롯. 반차는 0.5명, 온라인 상담·휴가·대기·온보딩은 0명입니다. 표의 괄호는 대면 연인원(명·일)입니다.
+        </div>
+      </div>
+
+      {/* 월 추이 */}
+      <div style={card}>
+        <div style={title}>월별 제공 슬롯 <span style={sub}>최근 {SUPPLY_HISTORY_MONTHS}개월 · 슬롯 (대면 연인원)</span></div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr><th style={{ ...thS, textAlign: "left" }}>월</th>{langHeads}</tr></thead>
+            <tbody>
+              {[...monthly].reverse().map(({ y, m, supply, current }) => (
+                <tr key={`${y}-${m}`} style={current ? { background: C.orangeLight } : {}}>
+                  <td style={tdL}>{y !== year ? `${y}년 ` : ""}{m}월{current && <span style={{ color: C.orangeDark, fontWeight: 600 }}> (조회 중)</span>}</td>
+                  {supply ? langCells(supply.month)
+                    : <td colSpan={SUPPLY_LANGS.length + 1} style={{ ...td, textAlign: "center", color: C.g3 }}>{history ? "근무표 없음" : "불러오는 중…"}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* 주 추이 */}
+      <div style={card}>
+        <div style={title}>주별 제공 슬롯 <span style={sub}>일~토 기준 (일요일 휴무) · 최근 주가 위</span></div>
+        <div style={{ overflowX: "auto", maxHeight: 420, overflowY: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr><th style={{ ...thS, textAlign: "left" }}>주</th>{langHeads}</tr></thead>
+            <tbody>
+              {weekly.map(wk => (
+                <tr key={wk.key}>
+                  <td style={tdL}>{md(wk.start)}~{md(wk.end)}{wk.partial && <span style={{ color: C.grey, fontWeight: 500 }}> (일부)</span>}</td>
+                  {langCells(wk.tot)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* 일별 (조회 중인 달) */}
+      <div style={card}>
+        <div style={title}>{month}월 일별 제공 슬롯 <span style={sub}>슬롯 (대면 인원)</span></div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr><th style={{ ...thS, textAlign: "left" }}>날짜</th>{langHeads}</tr></thead>
+            <tbody>
+              {Object.entries(cur.byDay).map(([d, row]) => {
+                const dow = new Date(year, month - 1, +d).getDay();
+                const closed = total(row) === 0;
+                return (
+                  <tr key={d} style={closed ? { background: C.g1, color: C.g3 } : {}}>
+                    <td style={tdL}>{month}/{d}({DAYS_KO[dow]})</td>
+                    {closed ? <td colSpan={SUPPLY_LANGS.length + 1} style={{ ...td, textAlign: "center" }}>미운영</td> : langCells(row)}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* 상담사별 */}
+      <div style={card}>
+        <div style={title}>{month}월 상담사별 공급 · 언어 비율</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr>
+              <th style={{ ...thS, textAlign: "left" }}>상담사</th>
+              <th style={{ ...thS, textAlign: "left" }}>공급 언어 비율</th>
+              <th style={thS}>대면 근무일</th>
+              <th style={thS}>공급 슬롯</th>
+            </tr></thead>
+            <tbody>
+              {consultants.map(s => {
+                const per = cur.byStaff[s.id] || {};
+                const heads = Object.values(per).reduce((n, v) => n + v.heads, 0);
+                const slots = Object.values(per).reduce((n, v) => n + v.slots, 0);
+                const share = cur.shares[s.id];
+                const info = shareInfo(s);
+                const editing = shareEdit?.sid === s.id;
+                return (
+                  <tr key={s.id}>
+                    <td style={tdL}>{s.name}<div style={{ fontSize: 10, color: C.grey, fontWeight: 500 }}>{LANG_LABEL[s.lang] || s.lang}{s.onlineOnly ? " · 온라인 전담" : ""}</div></td>
+                    <td style={{ ...td, textAlign: "left" }}>
+                      {s.onlineOnly || !share ? <span style={{ color: C.g3 }}>대면 공급 없음</span> : editing ? (
+                        <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                          {SUPPLY_LANGS.map(lg => (
+                            <label key={lg} style={{ fontSize: 11 }}>{LANG_LABEL[lg]}
+                              <input type="number" min={0} max={100} value={shareEdit.pct[lg]}
+                                onChange={e => setShareEdit(p => ({ ...p, pct: { ...p.pct, [lg]: e.target.value } }))}
+                                style={{ width: 40, marginLeft: 2, border: `1px solid ${C.g2}`, borderRadius: 6, padding: "2px 4px", fontSize: 11, fontFamily: font }} />%
+                            </label>
+                          ))}
+                          <Btn onClick={() => saveShare(s.id, Object.fromEntries(SUPPLY_LANGS.map(lg => [lg, +shareEdit.pct[lg] || 0])))} style={{ padding: "2px 8px", fontSize: 11 }}>고정</Btn>
+                          {info.src === "고정" && <Btn onClick={() => saveShare(s.id, null)} style={{ padding: "2px 8px", fontSize: 11 }}>해제</Btn>}
+                          <span style={{ fontSize: 11, color: C.grey, cursor: "pointer" }} onClick={() => setShareEdit(null)}>취소</span>
+                        </span>
+                      ) : (
+                        <span style={{ cursor: "pointer" }} title="클릭해서 비율 고정"
+                          onClick={() => setShareEdit({ sid: s.id, pct: Object.fromEntries(SUPPLY_LANGS.map(lg => [lg, pct(share[lg])])) })}>
+                          <span style={{ background: info.src === "고정" ? C.plum : C.g1, color: info.src === "고정" ? C.white : C.g5, borderRadius: 4, padding: "1px 5px", fontSize: 10, fontWeight: 800, marginRight: 6 }}>{info.src}</span>
+                          {SUPPLY_LANGS.filter(lg => share[lg] >= 0.005).map(lg => `${LANG_LABEL[lg]} ${pct(share[lg])}%`).join(" · ")}
+                        </span>
+                      )}
+                    </td>
+                    <td style={td}>{heads ? num(heads) : ""}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{slots ? num(slots) : ""}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ fontSize: 11, color: C.grey, marginTop: 6, lineHeight: 1.6 }}>
+          기본은 근무표 주 언어 100%입니다. 태국어 상담사가 영어를 주로 받는 것처럼 실제 상담 언어가 다르면 비율을 클릭해 고정하세요 — 모든 달의 계산에 같이 반영됩니다.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CalendarView({ year, month, days, schedule, warnings, staff, altHolidays, onDayClick }) {
   const firstDow = getFirstDow(year, month);
   const warnMap  = {};
