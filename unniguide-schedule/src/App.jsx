@@ -4,7 +4,10 @@ import {
   KR_HOLIDAYS, getDays, isClosedSunday, closedSundaysOf,
   makeCalendar, computeBaseline, capacityNotes, evaluatePerson, breakdownText,
 } from '../lib/workload.js';
-import { SUPPLY_LANGS, DEFAULT_SLOTS, normalizeSupplySettings, computeSupply, shareFromPercent } from '../lib/supply.js';
+import {
+  SUPPLY_LANGS, DEFAULT_SLOTS, BASE_LANG, normalizeSupplySettings, computeSupply,
+  mergeLangAssign, resolveLang, monthKeyOf, weekKeyOf,
+} from '../lib/supply.js';
 
 const ALLOWED_EMAIL_DOMAIN = "healingpaper.com";
 const ADMIN_EMAILS = ["yong.yang@healingpaper.com", "moka.lee@healingpaper.com"];
@@ -149,7 +152,7 @@ const fbRoomOverride = (y, m) => `roomOverrides/${y}-${String(m).padStart(2, "0"
 const fbUserProfile  = (uid)   => `userProfiles/${uid}`;
 const fbJoinRequests = ()      => `joinRequests`;
 const fbSupplySettings = ()    => `supplySettings`; // 언어권별 상담사 1인당 하루 슬롯 수 (관리자 설정)
-const fbShareOverrides = ()    => `supplyShareOverrides`; // { [staffId]: { [언어권]: % } } — 상담 언어 비율 관리자 고정값
+const fbLangAssign = ()        => `supplyLangAssign`; // { [staffId]: { months: {YYYY-MM: 언어권}, weeks: {주 일요일 YYYY-MM-DD: 언어권} } }
 
 // 신규 로그인 사용자가 1차로 선택할 수 있는 역할 — GROUPS/LANG_GROUPS와 동일한 분류
 const ROLE_OPTIONS = [
@@ -190,7 +193,7 @@ export default function App() {
   const [roleSubmitting, setRoleSubmitting] = useState(false);
   const [showApprovals, setShowApprovals] = useState(false);
   const [supplySettingsRaw, setSupplySettingsRaw] = useState(null);
-  const [shareOverrides, setShareOverrides] = useState({});
+  const [langAssign, setLangAssign] = useState({});
   const userName = userProfile?.koreanName || "";
   const isAdmin = !!(authUser && ADMIN_EMAILS.includes(authUser.email));
   const myStaff = (authUser && staffList.find(s => s.email && s.email === authUser.email)) || null;
@@ -351,7 +354,7 @@ export default function App() {
     const u6 = dbListen(fbRoomOverride(year, month), val => setRoomOverrides(val || {}));
     const u7 = dbListen(fbJoinRequests(), val => setJoinRequests(val || {}));
     const u8 = dbListen(fbSupplySettings(), val => setSupplySettingsRaw(val));
-    const u9 = dbListen(fbShareOverrides(), val => setShareOverrides(val || {}));
+    const u9 = dbListen(fbLangAssign(), val => setLangAssign(val || {}));
 
     unsubRefs.current = [u1, u2, u3, u3b, u4, u6, u7, u8, u9];
     return () => unsubRefs.current.forEach(fn => fn());
@@ -478,12 +481,14 @@ export default function App() {
   // ── 대면 상담 공급량 (관리자 화면) ── 계산 규칙은 lib/supply.js, 지난 달 추이는 SupplyView가 따로 불러온다
   const supplySettings = useMemo(() => normalizeSupplySettings(supplySettingsRaw), [supplySettingsRaw]);
 
-  async function saveShareOverride(sid, pct) {
-    const s = staffList.find(x => x.id == sid);
-    await dbSet(`${fbShareOverrides()}/${sid}`, pct || null);
-    await addLog(pct
-      ? `${s?.name} 상담 언어 비율 고정: ` + SUPPLY_LANGS.filter(lg => +pct[lg]).map(lg => `${LANG_LABEL[lg]} ${pct[lg]}%`).join(", ")
-      : `${s?.name} 상담 언어 비율 고정 해제 (근무표 언어 기준)`);
+  // 공급 언어 지정 — scope "months"(그 달부터) | "weeks"(그 주만), changes = { [staffId]: 언어권 | BASE_LANG | null(지정 해제) }
+  async function saveLangAssign(scope, key, changes, label) {
+    const entries = Object.entries(changes);
+    if (!entries.length) return;
+    await Promise.all(entries.map(([sid, v]) => dbSet(`${fbLangAssign()}/${sid}/${scope}/${key}`, v || null)));
+    const name = sid => staffList.find(x => x.id == sid)?.name;
+    const txt = v => v === BASE_LANG ? "근무표 언어" : v ? LANG_LABEL[v] : "지정 해제";
+    await addLog(`공급 언어 지정 (${label}): ` + entries.map(([sid, v]) => `${name(sid)} → ${txt(v)}`).join(", "));
   }
 
   async function saveSupplySettings(next) {
@@ -1259,7 +1264,7 @@ export default function App() {
       {view === "supply" && isAdmin && (
         <SupplyView year={year} month={month} cal={cal} staffList={staffList} schedule={schedule} phaseAt={phaseAt}
           settings={supplySettings} onSaveSettings={saveSupplySettings}
-          overrides={shareOverrides} onSaveOverride={saveShareOverride} />
+          langAssign={langAssign} onSaveLangAssign={saveLangAssign} />
       )}
 
       {view === "calendar" && <CalendarView year={year} month={month} days={days} schedule={schedule} warnings={warnings} staff={displayStaff} altHolidays={allHolidays} onDayClick={setDayPopup} />}
@@ -1668,19 +1673,18 @@ function StaffFormModal({ mode, initial, onSave, onClose, font }) {
   );
 }
 
-// ── CalendarView ──────────────────────────────────────────────
 // ── 공급 슬롯 (관리자 전용) ───────────────────────────────────
 // 공급 = 근무표의 대면 근무 인원 × 1인당 하루 슬롯 (lib/supply.js)
-//   언어권별 공급은 근무표 주 언어 기준이고, 실제로 다른 언어를 주로 받는 상담사는 관리자가 비율을 고정한다.
+//   상담사를 어느 언어권 공급으로 볼지는 월·주 행을 눌러 지정한다 (월 = 그 달부터, 주 = 그 주만).
 // 지난 달 추이는 근무표 원본(schedule/·altHolidays/·cancelledHolidays/)을 한 번씩 읽어 같은 규칙으로 계산한다.
 const SUPPLY_HISTORY_MONTHS = 6; // 월·주 추이에 보여줄 기간 (조회 중인 달 포함)
 
-function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, onSaveSettings, overrides, onSaveOverride }) {
+function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, onSaveSettings, langAssign, onSaveLangAssign }) {
   const [draft, setDraft]     = useState(settings);
   const [dirty, setDirty]     = useState(false);
   const [saving, setSaving]   = useState(false);
   const [history, setHistory] = useState(null); // { "YYYY-MM": { y, m, schedule, alt, cancelled } } — 조회 중인 달 제외
-  const [shareEdit, setShareEdit] = useState(null); // { sid, pct }
+  const [periodEdit, setPeriodEdit] = useState(null); // { scope: "months"|"weeks", key, label, staff: { [sid]: { slots } }, draft: { [sid]: 값 } }
   useEffect(() => { if (!dirty) setDraft(settings); }, [settings, dirty]);
 
   const ymKey = (y, m) => `${y}-${String(m).padStart(2, "0")}`;
@@ -1705,16 +1709,13 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
     return () => { alive = false; };
   }, [pastMonths]);
 
-  const shareInfo = s => {
-    const fixed = shareFromPercent(overrides?.[s.id]);
-    return fixed ? { share: fixed, src: "고정" } : { share: null, src: "기본" };
-  };
+  const assign = useMemo(() => mergeLangAssign(staffList, langAssign), [staffList, langAssign]);
   const supplyOf = (c, sch, y, m) => computeSupply(c, {
     staff: staffList,
     statusOf:   (s, d) => sch?.[s.id]?.[d],
-    isActiveOn: (s, d) => phaseAt(s, y, m, d) === "active",
+    isActiveOn: (s, d) => phaseAt(s, y, m, d) === "active", // 미합류·온보딩 기간은 공급 아님
     settings,
-    shareOf: s => shareInfo(s).share,
+    assign,
   });
 
   // 조회 중인 달은 실시간 근무표, 지난 달은 불러온 원본으로 계산 → 월 순서대로
@@ -1727,7 +1728,7 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
     });
     out.push({ y: year, m: month, supply: supplyOf(cal, schedule, year, month), current: true });
     return out;
-  }, [history, pastMonths, cal, schedule, staffList, settings, overrides]);
+  }, [history, pastMonths, cal, schedule, staffList, settings, assign]);
   const cur = monthly[monthly.length - 1].supply;
 
   // 주 단위(일~토, 일요일은 휴무라 사실상 월~토) — 월 경계를 넘어 이어 붙인다.
@@ -1735,16 +1736,22 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
     const days = [];
     monthly.forEach(({ y, m, supply }) => {
       if (!supply) return;
-      Object.entries(supply.byDay).forEach(([d, row]) => days.push({ date: new Date(y, m - 1, +d), row }));
+      Object.entries(supply.byDay).forEach(([d, row]) => days.push({
+        date: new Date(y, m - 1, +d), key: weekKeyOf(y, m, +d), row,
+        staff: Object.entries(supply.byStaff).map(([sid, per]) => [sid, per[d]]).filter(([, v]) => v),
+      }));
     });
     const weeks = [];
-    days.forEach(({ date, row }) => {
-      const start = new Date(date); start.setDate(date.getDate() - date.getDay());
-      const key = start.getTime();
+    days.forEach(({ date, key, row, staff }) => {
       let wk = weeks[weeks.length - 1];
-      if (!wk || wk.key !== key) { wk = { key, start, end: date, n: 0, tot: Object.fromEntries(SUPPLY_LANGS.map(lg => [lg, { heads: 0, slots: 0 }])) }; weeks.push(wk); }
-      wk.end = date; wk.n++;
+      if (!wk || wk.key !== key) {
+        const start = new Date(date); start.setDate(date.getDate() - date.getDay());
+        wk = { key, start, end: date, tot: Object.fromEntries(SUPPLY_LANGS.map(lg => [lg, { heads: 0, slots: 0 }])), staff: {} };
+        weeks.push(wk);
+      }
+      wk.end = date;
       SUPPLY_LANGS.forEach(lg => { wk.tot[lg].heads += row[lg].heads; wk.tot[lg].slots += row[lg].slots; });
+      staff.forEach(([sid, v]) => { const o = (wk.staff[sid] ||= { slots: 0, langs: new Set() }); o.slots += v.slots; o.langs.add(v.lang); });
     });
     // 불러온 기간 앞뒤에서 잘린 주
     if (days.length && days[0].date.getDay() !== 0) weeks[0].partial = true;
@@ -1755,7 +1762,6 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
   const total = o => SUPPLY_LANGS.reduce((n, lg) => n + o[lg].slots, 0);
   const totalHeads = o => SUPPLY_LANGS.reduce((n, lg) => n + o[lg].heads, 0);
   const num = v => (Number.isInteger(v) ? v : +v.toFixed(1)).toLocaleString();
-  const pct = f => Math.round(f * 100);
   const md = dt => `${dt.getMonth() + 1}/${dt.getDate()}`;
   const card = { background: C.white, borderRadius: 12, padding: 14, border: `1px solid ${C.line}`, marginBottom: 12 };
   const title = { fontWeight: 800, fontSize: 13, color: C.black, marginBottom: 8 };
@@ -1781,14 +1787,53 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
     catch (e) { alert(`저장하지 못했어요: ${e.message}`); }
     finally { setSaving(false); }
   }
-  async function saveShare(sid, pctMap) {
-    try { await onSaveOverride(sid, pctMap); setShareEdit(null); }
-    catch (e) { alert(`저장하지 못했어요: ${e.message}`); }
-  }
-
   const consultants = staffList
     .filter(s => s.active && s.type === "consultant")
     .sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
+
+  // ── 기간별 공급 언어 편집 ──
+  // 월: 그 달부터 다음 지정 전까지 / 주: 그 주만. 편집 대상 = 대면 상담사 중 재직 중이거나 그 기간에 공급이 있는 사람
+  const supplyPeople = staffStats => staffList
+    .filter(s => s.type === "consultant" && !s.onlineOnly && SUPPLY_LANGS.includes(s.lang) && (s.active || staffStats[s.id]?.slots))
+    .sort((a, b) => consultOrd(a.name) - consultOrd(b.name));
+  const langsText = set => set && set.size ? [...set].map(lg => LANG_LABEL[lg]).join("·") : "-";
+  function openMonthEdit({ y, m, supply }) {
+    if (!supply) return;
+    const key = monthKeyOf(y, m);
+    const stats = {};
+    Object.entries(supply.byStaff).forEach(([sid, per]) => {
+      Object.values(per).forEach(v => { const o = (stats[sid] ||= { slots: 0, langs: new Set() }); o.slots += v.slots; o.langs.add(v.lang); });
+    });
+    const people = supplyPeople(stats);
+    setPeriodEdit({ scope: "months", key, label: `${y}년 ${m}월`, stats, people,
+      draft: Object.fromEntries(people.map(s => [s.id, assign[s.id]?.months?.[key] || ""])) });
+  }
+  function openWeekEdit(wk) {
+    const people = supplyPeople(wk.staff);
+    setPeriodEdit({ scope: "weeks", key: wk.key, label: `${md(wk.start)}~${md(wk.end)} 주`, stats: wk.staff, people,
+      draft: Object.fromEntries(people.map(s => [s.id, assign[s.id]?.weeks?.[wk.key] || ""])) });
+  }
+  // 이 기간 지정을 비웠을 때 적용될 언어 (월: 이전 달 지정 → 근무표 언어 / 주: 그 달 지정)
+  function inheritedLang(s, scope, key) {
+    const a = assign[s.id] || {};
+    if (scope === "weeks") {
+      const [y, m, d] = key.split("-").map(Number);
+      return resolveLang(s, { [s.id]: { months: a.months } }, y, m, d).lang;
+    }
+    const prev = Object.keys(a.months || {}).filter(k => k < key).sort().pop();
+    const v = prev ? a.months[prev] : null;
+    return v && v !== BASE_LANG ? v : s.lang;
+  }
+  async function savePeriodEdit() {
+    const { scope, key, label, people, draft } = periodEdit;
+    const changes = {};
+    people.forEach(s => {
+      const before = assign[s.id]?.[scope]?.[key] || ""; // 코드 기본값 포함 — 손대지 않은 칸은 저장하지 않는다
+      if (draft[s.id] !== before) changes[s.id] = draft[s.id] || null;
+    });
+    try { await onSaveLangAssign(scope, key, changes, label); setPeriodEdit(null); }
+    catch (e) { alert(`저장하지 못했어요: ${e.message}`); }
+  }
 
   return (
     <div>
@@ -1819,14 +1864,15 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
 
       {/* 월 추이 */}
       <div style={card}>
-        <div style={title}>월별 제공 슬롯 <span style={sub}>최근 {SUPPLY_HISTORY_MONTHS}개월 · 슬롯 (대면 연인원)</span></div>
+        <div style={title}>월별 제공 슬롯 <span style={sub}>최근 {SUPPLY_HISTORY_MONTHS}개월 · 슬롯 (대면 연인원) · 행을 누르면 그 달부터의 공급 언어 편집</span></div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ borderCollapse: "collapse", width: "100%" }}>
             <thead><tr><th style={{ ...thS, textAlign: "left" }}>월</th>{langHeads}</tr></thead>
             <tbody>
               {[...monthly].reverse().map(({ y, m, supply, current }) => (
-                <tr key={`${y}-${m}`} style={current ? { background: C.orangeLight } : {}}>
-                  <td style={tdL}>{y !== year ? `${y}년 ` : ""}{m}월{current && <span style={{ color: C.orangeDark, fontWeight: 600 }}> (조회 중)</span>}</td>
+                <tr key={`${y}-${m}`} onClick={() => openMonthEdit({ y, m, supply })} title={supply ? "눌러서 이 달부터의 상담사별 공급 언어 편집" : undefined}
+                  style={{ ...(current ? { background: C.orangeLight } : {}), cursor: supply ? "pointer" : "default" }}>
+                  <td style={tdL}>{y !== year ? `${y}년 ` : ""}{m}월{current && <span style={{ color: C.orangeDark, fontWeight: 600 }}> (조회 중)</span>} {supply && <span style={{ color: C.g3, fontWeight: 500 }}>✎</span>}</td>
                   {supply ? langCells(supply.month)
                     : <td colSpan={SUPPLY_LANGS.length + 1} style={{ ...td, textAlign: "center", color: C.g3 }}>{history ? "근무표 없음" : "불러오는 중…"}</td>}
                 </tr>
@@ -1838,14 +1884,15 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
 
       {/* 주 추이 */}
       <div style={card}>
-        <div style={title}>주별 제공 슬롯 <span style={sub}>일~토 기준 (일요일 휴무) · 최근 주가 위</span></div>
+        <div style={title}>주별 제공 슬롯 <span style={sub}>일~토 기준 (일요일 휴무) · 최근 주가 위 · 행을 누르면 그 주만 공급 언어 편집</span></div>
         <div style={{ overflowX: "auto", maxHeight: 420, overflowY: "auto" }}>
           <table style={{ borderCollapse: "collapse", width: "100%" }}>
             <thead><tr><th style={{ ...thS, textAlign: "left" }}>주</th>{langHeads}</tr></thead>
             <tbody>
               {weekly.map(wk => (
-                <tr key={wk.key}>
-                  <td style={tdL}>{md(wk.start)}~{md(wk.end)}{wk.partial && <span style={{ color: C.grey, fontWeight: 500 }}> (일부)</span>}</td>
+                <tr key={wk.key} onClick={() => openWeekEdit(wk)} title="눌러서 이 주만 상담사별 공급 언어 편집" style={{ cursor: "pointer" }}>
+                  <td style={tdL}>{md(wk.start)}~{md(wk.end)}{wk.partial && <span style={{ color: C.grey, fontWeight: 500 }}> (일부)</span>}
+                    {Object.values(assign).some(a => SUPPLY_LANGS.includes(a.weeks?.[wk.key]) || a.weeks?.[wk.key] === BASE_LANG) && <span style={{ color: C.plum, fontWeight: 800 }}> · 주 지정</span>} <span style={{ color: C.g3, fontWeight: 500 }}>✎</span></td>
                   {langCells(wk.tot)}
                 </tr>
               ))}
@@ -1878,47 +1925,33 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
 
       {/* 상담사별 */}
       <div style={card}>
-        <div style={title}>{month}월 상담사별 공급 · 언어 비율</div>
+        <div style={title}>{month}월 상담사별 공급 <span style={sub}>공급 언어는 위 월·주 행을 눌러 편집</span></div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ borderCollapse: "collapse", width: "100%" }}>
             <thead><tr>
               <th style={{ ...thS, textAlign: "left" }}>상담사</th>
-              <th style={{ ...thS, textAlign: "left" }}>공급 언어 비율</th>
+              <th style={{ ...thS, textAlign: "left" }}>공급 언어 ({month}월)</th>
               <th style={thS}>대면 근무일</th>
               <th style={thS}>공급 슬롯</th>
             </tr></thead>
             <tbody>
               {consultants.map(s => {
-                const per = cur.byStaff[s.id] || {};
-                const heads = Object.values(per).reduce((n, v) => n + v.heads, 0);
-                const slots = Object.values(per).reduce((n, v) => n + v.slots, 0);
-                const share = cur.shares[s.id];
-                const info = shareInfo(s);
-                const editing = shareEdit?.sid === s.id;
+                const per = cur.byStaff[s.id];
+                const vals = Object.values(per || {});
+                const heads = vals.reduce((n, v) => n + v.heads, 0);
+                const slots = vals.reduce((n, v) => n + v.slots, 0);
+                const r = resolveLang(s, assign, year, month, 1);
+                const srcText = r.src === "month" ? `${+r.from.slice(5)}월부터 지정` : "근무표 언어";
+                const weekLangs = new Set(vals.map(v => v.lang));
                 return (
                   <tr key={s.id}>
-                    <td style={tdL}>{s.name}<div style={{ fontSize: 10, color: C.grey, fontWeight: 500 }}>{LANG_LABEL[s.lang] || s.lang}{s.onlineOnly ? " · 온라인 전담" : ""}</div></td>
+                    <td style={tdL}>{s.name}<div style={{ fontSize: 10, color: C.grey, fontWeight: 500 }}>근무표: {LANG_LABEL[s.lang] || s.lang}{s.onlineOnly ? " · 온라인 전담" : ""}</div></td>
                     <td style={{ ...td, textAlign: "left" }}>
-                      {s.onlineOnly || !share ? <span style={{ color: C.g3 }}>대면 공급 없음</span> : editing ? (
-                        <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                          {SUPPLY_LANGS.map(lg => (
-                            <label key={lg} style={{ fontSize: 11 }}>{LANG_LABEL[lg]}
-                              <input type="number" min={0} max={100} value={shareEdit.pct[lg]}
-                                onChange={e => setShareEdit(p => ({ ...p, pct: { ...p.pct, [lg]: e.target.value } }))}
-                                style={{ width: 40, marginLeft: 2, border: `1px solid ${C.g2}`, borderRadius: 6, padding: "2px 4px", fontSize: 11, fontFamily: font }} />%
-                            </label>
-                          ))}
-                          <Btn onClick={() => saveShare(s.id, Object.fromEntries(SUPPLY_LANGS.map(lg => [lg, +shareEdit.pct[lg] || 0])))} style={{ padding: "2px 8px", fontSize: 11 }}>고정</Btn>
-                          {info.src === "고정" && <Btn onClick={() => saveShare(s.id, null)} style={{ padding: "2px 8px", fontSize: 11 }}>해제</Btn>}
-                          <span style={{ fontSize: 11, color: C.grey, cursor: "pointer" }} onClick={() => setShareEdit(null)}>취소</span>
-                        </span>
-                      ) : (
-                        <span style={{ cursor: "pointer" }} title="클릭해서 비율 고정"
-                          onClick={() => setShareEdit({ sid: s.id, pct: Object.fromEntries(SUPPLY_LANGS.map(lg => [lg, pct(share[lg])])) })}>
-                          <span style={{ background: info.src === "고정" ? C.plum : C.g1, color: info.src === "고정" ? C.white : C.g5, borderRadius: 4, padding: "1px 5px", fontSize: 10, fontWeight: 800, marginRight: 6 }}>{info.src}</span>
-                          {SUPPLY_LANGS.filter(lg => share[lg] >= 0.005).map(lg => `${LANG_LABEL[lg]} ${pct(share[lg])}%`).join(" · ")}
-                        </span>
-                      )}
+                      {!per ? <span style={{ color: C.g3 }}>대면 공급 없음</span> : <>
+                        <strong>{LANG_LABEL[r.lang]}</strong>
+                        <span style={{ color: r.src === "month" ? C.plum : C.grey, fontSize: 10, marginLeft: 6 }}>{srcText}</span>
+                        {weekLangs.size > 1 && <span style={{ color: C.plum, fontSize: 10, marginLeft: 6 }}>· 주 지정으로 {langsText(weekLangs)}</span>}
+                      </>}
                     </td>
                     <td style={td}>{heads ? num(heads) : ""}</td>
                     <td style={{ ...td, fontWeight: 700 }}>{slots ? num(slots) : ""}</td>
@@ -1929,13 +1962,57 @@ function SupplyView({ year, month, cal, staffList, schedule, phaseAt, settings, 
           </table>
         </div>
         <div style={{ fontSize: 11, color: C.grey, marginTop: 6, lineHeight: 1.6 }}>
-          기본은 근무표 주 언어 100%입니다. 태국어 상담사가 영어를 주로 받는 것처럼 실제 상담 언어가 다르면 비율을 클릭해 고정하세요 — 모든 달의 계산에 같이 반영됩니다.
+          미합류·온보딩 기간(직원 정보의 합류일·대면 시작일 이전, 또는 온보딩·대기 셀)은 공급으로 세지 않습니다.
         </div>
       </div>
+
+      {/* 기간별 공급 언어 편집 */}
+      {periodEdit && (
+        <Modal wide onClose={() => setPeriodEdit(null)}>
+          <div style={{ fontWeight: 800, fontSize: 15, color: C.black, marginBottom: 4 }}>{periodEdit.label} 공급 언어</div>
+          <div style={{ fontSize: 11, color: C.grey, marginBottom: 12, lineHeight: 1.6 }}>
+            {periodEdit.scope === "months"
+              ? "여기서 정한 언어는 이 달부터 다음 지정이 있는 달 전까지 이어집니다. 특정 주만 다르면 주별 표에서 그 주를 눌러 지정하세요."
+              : "이 주에만 적용됩니다. 비워두면 그 달의 월 지정을 따릅니다."}
+          </div>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr>
+              <th style={{ ...thS, textAlign: "left" }}>상담사</th>
+              <th style={thS}>이 기간 슬롯</th>
+              <th style={{ ...thS, textAlign: "left" }}>공급 언어</th>
+            </tr></thead>
+            <tbody>
+              {periodEdit.people.map(s => {
+                const inh = inheritedLang(s, periodEdit.scope, periodEdit.key);
+                const v = periodEdit.draft[s.id];
+                return (
+                  <tr key={s.id}>
+                    <td style={tdL}>{s.name}<div style={{ fontSize: 10, color: C.grey, fontWeight: 500 }}>근무표: {LANG_LABEL[s.lang]}{!s.active ? " · 비활성" : ""}</div></td>
+                    <td style={td}>{periodEdit.stats[s.id]?.slots ? num(periodEdit.stats[s.id].slots) : "-"}</td>
+                    <td style={{ ...td, textAlign: "left" }}>
+                      <select value={v} onChange={e => { const nv = e.target.value; setPeriodEdit(p => ({ ...p, draft: { ...p.draft, [s.id]: nv } })); }}
+                        style={{ border: `1px solid ${v ? C.plumMid : C.g2}`, borderRadius: 6, padding: "4px 6px", fontSize: 12, fontFamily: font, color: v ? C.plum : C.g6, fontWeight: v ? 800 : 500 }}>
+                        <option value="">{periodEdit.scope === "months" ? "이전 지정 따름" : "월 지정 따름"} ({LANG_LABEL[inh]})</option>
+                        {SUPPLY_LANGS.map(lg => <option key={lg} value={lg}>{LANG_LABEL[lg]}</option>)}
+                        {s.lang && <option value={BASE_LANG}>근무표 언어로 되돌림 ({LANG_LABEL[s.lang]})</option>}
+                      </select>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", marginTop: 14 }}>
+            <Btn onClick={() => setPeriodEdit(null)}>취소</Btn>
+            <Btn onClick={savePeriodEdit} style={{ background: C.orange, color: C.white, border: "none" }}>저장</Btn>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
+// ── CalendarView ──────────────────────────────────────────────
 function CalendarView({ year, month, days, schedule, warnings, staff, altHolidays, onDayClick }) {
   const firstDow = getFirstDow(year, month);
   const warnMap  = {};
